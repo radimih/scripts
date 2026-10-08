@@ -4,6 +4,10 @@ set -euo pipefail
 
 # Скрипт предполагает запуск от имени пользователя root
 
+CL_GREEN='\033[0;32m'
+CL_NO='\033[0m'
+CL_RED='\033[0;31m'
+
 CONSOLE_SETUP_FILE=/etc/default/console-setup
 
 # Параметры консоли в форме ассоциированного массива [<параметр>]=<значение>
@@ -13,13 +17,33 @@ declare -A CONSOLE_SETUP_PARAMS=(
   [FONTSIZE]=8x16
 )
 
-CL_GREEN='\033[0;32m'
-CL_RED='\033[0;31m'
-CL_NO='\033[0m'
+OS_RELEASE_FILE=/etc/os-release
 
 main() {
 
+  check_debian
   configure_linux_console
+}
+
+check_debian() {
+
+  local os_id
+
+  print_step_msg "Checking the operating system"
+
+  if [[ ! -f "$OS_RELEASE_FILE" ]]; then
+    print_error_msg "... the file $OS_RELEASE_FILE does not exist, cannot detect the operating system"
+    return 1
+  fi
+
+  # ID — единственный надёжный признак дистрибутива в os-release: у Debian это
+  # ровно debian, у производных (Ubuntu и т. п.) значение другое
+  os_id="$(sed --quiet --regexp-extended 's/^ID="?([^"]*)"?$/\1/p' "$OS_RELEASE_FILE")"
+
+  if [[ "$os_id" != "debian" ]]; then
+    print_error_msg "... the script runs on Debian only, the current system is ${os_id:-unknown}"
+    return 1
+  fi
 }
 
 configure_linux_console() {
