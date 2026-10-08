@@ -36,8 +36,6 @@ check_debian() {
     return 1
   fi
 
-  # ID — единственный надёжный признак дистрибутива в os-release: у Debian это
-  # ровно debian, у производных (Ubuntu и т. п.) значение другое
   os_id="$(sed --quiet --regexp-extended 's/^ID="?([^"]*)"?$/\1/p' "$OS_RELEASE_FILE")"
 
   if [[ "$os_id" != "debian" ]]; then
@@ -61,8 +59,6 @@ configure_linux_console() {
     set_config_param "$CONSOLE_SETUP_FILE" "$key" "${CONSOLE_SETUP_PARAMS[$key]}"
   done
 
-  # setupcon вызывается всегда, даже когда файл уже был настроен: так состояние
-  # консоли гарантированно соответствует файлу
   setupcon
 }
 
