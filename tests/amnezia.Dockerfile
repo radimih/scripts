@@ -1,11 +1,16 @@
 # Тестовый образ для amnezia.sh: базовое тестовое окружение Debian 13 плюс
-# пакет console-setup, который настраивает скрипт.
+# пакеты, которые ставит сам скрипт (APT_PACKAGES в amnezia.sh). Сборка образа
+# заодно проверяет, что все имена пакетов есть в Debian 13.
 
 ARG BASE_IMAGE=scripts-test:debian
 FROM ${BASE_IMAGE}
 
 RUN apt-get update \
- && apt-get install --yes --no-install-recommends console-setup \
+ && apt-get install --yes --no-install-recommends \
+      console-setup \
+      curl \
+      ufw \
+      unattended-upgrades \
  && rm -rf /var/lib/apt/lists/*
 
 # Копии /etc/default/console-setup (в том виде, в каком его ставит пакет

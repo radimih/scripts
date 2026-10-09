@@ -4,6 +4,14 @@ set -euo pipefail
 
 # Скрипт предполагает запуск от имени пользователя root
 
+# Устанавливаемые apt-пакеты в алфавитном порядке
+APT_PACKAGES=(
+  console-setup
+  curl
+  ufw
+  unattended-upgrades
+)
+
 CL_GREEN='\033[0;32m'
 CL_NO='\033[0m'
 CL_RED='\033[0;31m'
@@ -22,6 +30,7 @@ OS_RELEASE_FILE=/etc/os-release
 main() {
 
   check_debian
+  install_apt_packages
   configure_linux_console
 }
 
@@ -42,6 +51,15 @@ check_debian() {
     print_error_msg "... the script runs on Debian only, the current system is ${os_id:-unknown}"
     return 1
   fi
+}
+
+install_apt_packages() {
+
+  print_step_msg "Installing apt packages: ${APT_PACKAGES[*]}"
+
+  apt-get update
+
+  DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
 }
 
 configure_linux_console() {

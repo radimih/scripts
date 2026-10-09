@@ -17,6 +17,9 @@
 # - повторный запуск не меняет файл (идемпотентность);
 # - при отсутствии /etc/default/console-setup скрипт завершается с ошибкой
 #   и внятным сообщением;
+# - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
+#   в алфавитном порядке;
+# - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
 # - скрипт вызывает setupcon;
 # - shellcheck не находит замечаний.
 
@@ -32,6 +35,18 @@ OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
 setup() {
   cp -- "$CONSOLE_SETUP_PRISTINE" "$CONSOLE_SETUP_FILE"
   cp -- "$OS_RELEASE_PRISTINE" "$OS_RELEASE_FILE"
+
+  # apt-get не выполняется по-настоящему: тесты проверяют не установку пакетов,
+  # а то, как скрипт её запускает. Заглушка записывает вызовы в файл, чтобы тест
+  # мог проверить их состав и порядок.
+  local stub_dir="${BATS_TEST_TMPDIR}/bin"
+  mkdir --parents "$stub_dir"
+  cat > "${stub_dir}/apt-get" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/apt-get.calls"
+EOF
+  chmod +x "${stub_dir}/apt-get"
+  export PATH="${stub_dir}:${PATH}"
 }
 
 # Перезаписывает строку параметра целиком (строка может быть закомментирована).
@@ -65,6 +80,23 @@ count_exact_lines() {
 # Проверяет, что в файле есть строка, целиком совпадающая с ожидаемой.
 assert_has_line() {
   grep --fixed-strings --line-regexp --quiet -- "$1" "$CONSOLE_SETUP_FILE"
+}
+
+# Пакеты из APT_PACKAGES в скрипте, по одному в строке.
+script_apt_packages() {
+  sed --quiet --regexp-extended '/^APT_PACKAGES=\(/,/^\)/p' "$SCRIPT_UNDER_TEST" \
+    | sed --regexp-extended --expression='1d' --expression='$d' \
+    | tr --delete '[:blank:]'
+}
+
+# Пакеты, которые ставит тестовый образ (RUN apt-get install ...), по одному
+# в строке.
+dockerfile_apt_packages() {
+  sed --quiet --regexp-extended \
+      '/apt-get install/,/rm -rf/p' \
+      "${BATS_TEST_DIRNAME}/amnezia.Dockerfile" \
+    | grep --invert-match --fixed-strings -- '&&' \
+    | tr --delete '[:blank:]\\'
 }
 
 @test "sets the required values for the three console parameters" {
@@ -175,6 +207,24 @@ assert_has_line() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot detect the operating system"* ]]
   assert_has_line 'CODESET="guess"'
+}
+
+@test "updates the package database and installs the packages in alphabetical order" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
+  # порядке; ничего лишнего не вызывается.
+  [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
+      = $'update\ninstall --yes console-setup curl ufw unattended-upgrades' ]
+}
+
+@test "installs in the test image the same packages as the script" {
+  run diff --unified \
+      <(script_apt_packages) \
+      <(dockerfile_apt_packages)
+
+  [ "$status" -eq 0 ]
 }
 
 @test "applies the configuration by running setupcon" {
