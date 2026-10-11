@@ -55,7 +55,7 @@ check_debian() {
 
 install_apt_packages() {
 
-  print_step_msg "Installing apt packages: ${APT_PACKAGES[*]}"
+  print_step_msg "Installing apt packages"
 
   apt-get update
 
