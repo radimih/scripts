@@ -17,6 +17,12 @@
 # - повторный запуск не меняет файл (идемпотентность);
 # - при отсутствии /etc/default/console-setup скрипт завершается с ошибкой
 #   и внятным сообщением;
+# - параметры ядра из SYSCTL_PARAMS записываются в /etc/sysctl.d/9999-router.conf:
+#   нужные строки заменяются на месте, остальное содержимое файла не меняется,
+#   повторный запуск файл не меняет;
+# - параметры ядра применяются вызовом sysctl --load с этим файлом;
+# - при отсутствии каталога /etc/sysctl.d скрипт завершается с ошибкой
+#   и внятным сообщением, не трогая настройки консоли;
 # - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
 #   в алфавитном порядке;
 # - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
@@ -26,6 +32,8 @@
 SCRIPT_UNDER_TEST="${BATS_TEST_DIRNAME}/../amnezia.sh"
 CONSOLE_SETUP_FILE="/etc/default/console-setup"
 OS_RELEASE_FILE="/etc/os-release"
+SYSCTL_DIR="/etc/sysctl.d"
+SYSCTL_FILE="${SYSCTL_DIR}/9999-router.conf"
 # Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакет
 # console-setup: setup() восстанавливает из них исходное состояние перед каждым
 # сценарием.
@@ -35,17 +43,23 @@ OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
 setup() {
   cp -- "$CONSOLE_SETUP_PRISTINE" "$CONSOLE_SETUP_FILE"
   cp -- "$OS_RELEASE_PRISTINE" "$OS_RELEASE_FILE"
+  mkdir --parents "$SYSCTL_DIR"
+  rm --force -- "$SYSCTL_FILE"
 
-  # apt-get не выполняется по-настоящему: тесты проверяют не установку пакетов,
-  # а то, как скрипт её запускает. Заглушка записывает вызовы в файл, чтобы тест
-  # мог проверить их состав и порядок.
+  # apt-get и sysctl не выполняются по-настоящему: тесты проверяют не установку
+  # пакетов и не применение параметров ядра, а то, как скрипт их запускает.
+  # Заглушки записывают вызовы в файлы, чтобы тест мог проверить их состав
+  # и порядок.
   local stub_dir="${BATS_TEST_TMPDIR}/bin"
+  local name
   mkdir --parents "$stub_dir"
-  cat > "${stub_dir}/apt-get" <<EOF
+  for name in apt-get sysctl; do
+    cat > "${stub_dir}/${name}" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/apt-get.calls"
+printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/${name}.calls"
 EOF
-  chmod +x "${stub_dir}/apt-get"
+    chmod +x "${stub_dir}/${name}"
+  done
   export PATH="${stub_dir}:${PATH}"
 }
 
@@ -71,15 +85,15 @@ drop_param() {
       "/^[[:space:]]*#?[[:space:]]*${key}=/d" "$CONSOLE_SETUP_FILE"
 }
 
-# Число строк файла, целиком совпадающих с ожидаемой строкой; при отсутствии
-# совпадений возвращает 0, а не ошибку.
+# Число строк файла, целиком совпадающих с ожидаемой строкой; первым аргументом
+# идёт строка, вторым — файл. При отсутствии совпадений возвращает 0, а не ошибку.
 count_exact_lines() {
-  grep --fixed-strings --line-regexp --count -- "$1" "$CONSOLE_SETUP_FILE" || true
+  grep --fixed-strings --line-regexp --count -- "$1" "$2" || true
 }
 
 # Проверяет, что в файле есть строка, целиком совпадающая с ожидаемой.
 assert_has_line() {
-  grep --fixed-strings --line-regexp --quiet -- "$1" "$CONSOLE_SETUP_FILE"
+  grep --fixed-strings --line-regexp --quiet -- "$1" "$2"
 }
 
 # Пакеты из APT_PACKAGES в скрипте, по одному в строке.
@@ -107,16 +121,16 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
-  assert_has_line 'CODESET="FullCyrSlav"'
-  assert_has_line 'FONTFACE="Terminus"'
-  assert_has_line 'FONTSIZE="8x16"'
+  assert_has_line 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE"
+  assert_has_line 'FONTFACE="Terminus"' "$CONSOLE_SETUP_FILE"
+  assert_has_line 'FONTSIZE="8x16"' "$CONSOLE_SETUP_FILE"
 
   # Остальные настройки пакета не затронуты, включая закомментированный
   # пример FONT= (ключ FONT — префикс ключа FONTFACE).
-  assert_has_line 'ACTIVE_CONSOLES="/dev/tty[1-6]"'
-  assert_has_line 'CHARMAP="UTF-8"'
-  assert_has_line 'VIDEOMODE='
-  assert_has_line "# FONT='lat9w-08.psf.gz brl-8x8.psf'"
+  assert_has_line 'ACTIVE_CONSOLES="/dev/tty[1-6]"' "$CONSOLE_SETUP_FILE"
+  assert_has_line 'CHARMAP="UTF-8"' "$CONSOLE_SETUP_FILE"
+  assert_has_line 'VIDEOMODE=' "$CONSOLE_SETUP_FILE"
+  assert_has_line "# FONT='lat9w-08.psf.gz brl-8x8.psf'" "$CONSOLE_SETUP_FILE"
 }
 
 @test "replaces commented-out parameters in place without duplicating them" {
@@ -129,10 +143,10 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
-  [ "$(count_exact_lines 'CODESET="FullCyrSlav"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTFACE="Terminus"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTSIZE="8x16"')" -eq 1 ]
-  [ "$(count_exact_lines '# CODESET="guess"')" -eq 0 ]
+  [ "$(count_exact_lines 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTFACE="Terminus"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTSIZE="8x16"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines '# CODESET="guess"' "$CONSOLE_SETUP_FILE")" -eq 0 ]
   # Строки заменены на месте, а не добавлены в конец файла.
   [ "$(wc --lines < "$CONSOLE_SETUP_FILE")" -eq "$lines_before" ]
 }
@@ -147,9 +161,9 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
-  [ "$(count_exact_lines 'CODESET="FullCyrSlav"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTFACE="Terminus"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTSIZE="8x16"')" -eq 1 ]
+  [ "$(count_exact_lines 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTFACE="Terminus"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTSIZE="8x16"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
   [ "$(wc --lines < "$CONSOLE_SETUP_FILE")" -eq "$((lines_before + 3))" ]
 }
 
@@ -163,9 +177,9 @@ dockerfile_apt_packages() {
 
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$CONSOLE_SETUP_FILE")" = "$after_first" ]
-  [ "$(count_exact_lines 'CODESET="FullCyrSlav"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTFACE="Terminus"')" -eq 1 ]
-  [ "$(count_exact_lines 'FONTSIZE="8x16"')" -eq 1 ]
+  [ "$(count_exact_lines 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTFACE="Terminus"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'FONTSIZE="8x16"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
 }
 
 @test "fails with a clear message when the configuration file is missing" {
@@ -185,7 +199,7 @@ dockerfile_apt_packages() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"the current system is ubuntu"* ]]
   # Настройка консоли не выполняется: проверка ОС идёт первой.
-  assert_has_line 'CODESET="guess"'
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
 }
 
 @test "fails when the system ID cannot be determined" {
@@ -196,7 +210,7 @@ dockerfile_apt_packages() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"the current system is unknown"* ]]
   # Настройка консоли не выполняется: проверка ОС идёт первой.
-  assert_has_line 'CODESET="guess"'
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
 }
 
 @test "fails when the OS release file is missing" {
@@ -206,7 +220,7 @@ dockerfile_apt_packages() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot detect the operating system"* ]]
-  assert_has_line 'CODESET="guess"'
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
 }
 
 @test "updates the package database and installs the packages in alphabetical order" {
@@ -217,6 +231,74 @@ dockerfile_apt_packages() {
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
       = $'update\ninstall --yes console-setup curl ufw unattended-upgrades' ]
+}
+
+@test "writes the kernel parameters for the router role" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  assert_has_line 'net.core.default_qdisc = fq' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv4.tcp_keepalive_probes = 1' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv4.tcp_mtu_probing = 1' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv6.conf.all.forwarding = 1' "$SYSCTL_FILE"
+  # Записаны только заданные параметры, по одному в строке.
+  [ "$(wc --lines < "$SYSCTL_FILE")" -eq 6 ]
+}
+
+@test "keeps the rest of the kernel parameters file and rewrites existing lines in place" {
+  cat > "$SYSCTL_FILE" <<'EOF'
+# Local notes
+net.ipv4.tcp_congestion_control = cubic
+#net.ipv4.ip_forward=0
+vm.swappiness = 10
+EOF
+  local lines_before
+  lines_before="$(wc --lines < "$SYSCTL_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Строки с нашими ключами заменены на месте, в том числе закомментированная.
+  assert_has_line 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
+  [ "$(count_exact_lines 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE")" -eq 1 ]
+  # Чужие строки не тронуты, остальные наши параметры добавлены в конец файла.
+  assert_has_line '# Local notes' "$SYSCTL_FILE"
+  assert_has_line 'vm.swappiness = 10' "$SYSCTL_FILE"
+  [ "$(wc --lines < "$SYSCTL_FILE")" -eq "$((lines_before + 4))" ]
+}
+
+@test "is idempotent for the kernel parameters file: a second run does not change it" {
+  run "$SCRIPT_UNDER_TEST"
+  [ "$status" -eq 0 ]
+  local after_first
+  after_first="$(sha256sum "$SYSCTL_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$SYSCTL_FILE")" = "$after_first" ]
+}
+
+@test "applies the kernel parameters by running sysctl --load" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/sysctl.calls")" = "--load=${SYSCTL_FILE}" ]
+}
+
+@test "fails with a clear message when the kernel parameters directory is missing" {
+  rm --recursive --force -- "$SYSCTL_DIR"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$SYSCTL_DIR"* ]]
+  # Шаг идёт раньше настройки консоли, поэтому она не выполняется.
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
 }
 
 @test "installs in the test image the same packages as the script" {

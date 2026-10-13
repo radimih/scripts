@@ -27,10 +27,25 @@ declare -A CONSOLE_SETUP_PARAMS=(
 
 OS_RELEASE_FILE=/etc/os-release
 
+SYSCTL_DIR=/etc/sysctl.d
+SYSCTL_FILE=${SYSCTL_DIR}/9999-router.conf
+
+# Параметры ядра для работы роутером в форме <параметр>=<значение>, в порядке
+# записи в файл
+SYSCTL_PARAMS=(
+  net.core.default_qdisc=fq
+  net.ipv4.ip_forward=1
+  net.ipv4.tcp_congestion_control=bbr
+  net.ipv4.tcp_keepalive_probes=1
+  net.ipv4.tcp_mtu_probing=1
+  net.ipv6.conf.all.forwarding=1
+)
+
 main() {
 
   check_debian
   install_apt_packages
+  configure_router_sysctl
   configure_linux_console
 }
 
@@ -62,6 +77,26 @@ install_apt_packages() {
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
 }
 
+configure_router_sysctl() {
+
+  local param
+  local key
+
+  print_step_msg "Configuring kernel parameters for routing (${SYSCTL_FILE})"
+
+  if [[ ! -d "${SYSCTL_DIR}" ]]; then
+    print_error_msg "... the directory ${SYSCTL_DIR} does not exist, cannot write ${SYSCTL_FILE}"
+    return 1
+  fi
+
+  for param in "${SYSCTL_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_config_param "${SYSCTL_FILE}" "${key}" "${key} = ${param#*=}"
+  done
+
+  sysctl --load="${SYSCTL_FILE}"
+}
+
 configure_linux_console() {
 
   local key
@@ -74,7 +109,7 @@ configure_linux_console() {
   fi
 
   for key in "${!CONSOLE_SETUP_PARAMS[@]}"; do
-    set_config_param "${CONSOLE_SETUP_FILE}" "${key}" "${CONSOLE_SETUP_PARAMS[${key}]}"
+    set_config_param "${CONSOLE_SETUP_FILE}" "${key}" "${key}=\"${CONSOLE_SETUP_PARAMS[${key}]}\""
   done
 
   setupcon
@@ -84,19 +119,17 @@ set_config_param() {
 
   local file="$1"
   local key="$2"
-  local value="$3"
-
-  local assignment="${key}=\"${value}\""
+  local assignment="$3"
 
   # Если значение параметра уже установлено
-  if grep --silent --no-messages --regexp "^${assignment}$" "${file}"; then
+  if grep --silent --no-messages --fixed-strings --line-regexp -- "${assignment}" "${file}"; then
     return 0
   fi
 
   # Заменить существующий параметр, даже если он закомментирован; если параметра
   # нет — добавить его последней строкой файла
-  if grep --silent --no-messages --extended-regexp "^[[:space:]]*#?[[:space:]]*${key}=" "${file}"; then
-    sed --in-place --regexp-extended "s|^[[:space:]]*#?[[:space:]]*${key}=.*|${assignment}|" "${file}"
+  if grep --silent --no-messages --extended-regexp "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=" "${file}"; then
+    sed --in-place --regexp-extended "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=.*|${assignment}|" "${file}"
   else
     echo "${assignment}" >> "${file}"
   fi
