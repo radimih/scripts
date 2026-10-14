@@ -28,7 +28,7 @@
 # - повторный запуск файл настроек sshd не меняет (идемпотентность);
 # - настройки применяются перезагрузкой sshd;
 # - при отсутствии каталога /etc/ssh/sshd_config.d скрипт завершается с ошибкой
-#   и внятным сообщением;
+#   и внятным сообщением (шаг идёт после настройки параметров ядра);
 # - брандмауэр настраивается командами ufw: входящие соединения запрещены по
 #   умолчанию, разрешён только ssh, исходящие разрешены; перенаправляемые
 #   (транзитные, например трафик клиентов VPN) разрешены; ssh разрешается до
@@ -61,8 +61,9 @@
 # - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
 #   в алфавитном порядке, включая docker.io, docker-cli и docker-compose;
 # - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
-# - служба Docker включается и запускается (systemctl enable --now docker),
-#   поэтому установленные Docker и Docker Compose готовы к работе;
+# - служба Docker включается и запускается последним шагом
+#   (systemctl enable --now docker), поэтому установленные Docker и Docker
+#   Compose готовы к работе;
 # - скрипт вызывает setupcon;
 # - shellcheck не находит замечаний.
 
@@ -400,8 +401,12 @@ dockerfile_apt_packages() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$SSHD_CONFIG_DIR"* ]]
-  # Шаг идёт после настройки консоли, поэтому она уже выполнена.
+  # Шаг идёт после настройки консоли и параметров ядра, поэтому они уже выполнены.
   assert_has_line 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE"
+  assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
+  # Служба Docker включается последним шагом, до неё дело не дошло; sshd тоже не
+  # перезагружался, поэтому systemctl не вызывался.
+  [ ! -f "${BATS_TEST_TMPDIR}/systemctl.calls" ]
 }
 
 @test "leaves only ssh open for incoming connections and allows all outgoing ones" {
@@ -463,13 +468,16 @@ dockerfile_apt_packages() {
       = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io openssh-server ufw unattended-upgrades' ]
 }
 
-@test "enables and starts the Docker service" {
+@test "enables and starts the Docker service as the last step" {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Configuring Docker"* ]]
   [[ "$output" == *"Enabling and starting the Docker service"* ]]
-  assert_has_line 'enable --now docker' "${BATS_TEST_TMPDIR}/systemctl.calls"
+  # Служба включается последним шагом: единственный вызов systemctl до него —
+  # перезагрузка sshd.
+  [ "$(cat "${BATS_TEST_TMPDIR}/systemctl.calls")" \
+      = $'reload ssh\nenable --now docker' ]
 }
 
 @test "writes the kernel parameters for the router role" {

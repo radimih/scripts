@@ -108,13 +108,13 @@ main() {
 
   check_debian
   install_apt_packages
-  configure_docker
   configure_linux_console
   configure_time_zone
-  configure_ssh
-  configure_firewall
   configure_automatic_upgrades
   configure_router_sysctl
+  configure_ssh
+  configure_firewall
+  configure_docker
 }
 
 check_debian() {
@@ -160,14 +160,6 @@ install_apt_packages() {
   apt-get update
 
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
-}
-
-configure_docker() {
-
-  print_step_msg "Configuring Docker"
-
-  print_info_msg "Enabling and starting the Docker service"
-  systemctl enable --now docker
 }
 
 configure_ssh() {
@@ -274,6 +266,14 @@ configure_linux_console() {
   done
 
   setupcon
+}
+
+configure_docker() {
+
+  print_step_msg "Configuring Docker"
+
+  print_info_msg "Enabling and starting the Docker service"
+  systemctl enable --now docker
 }
 
 # Задаёт в файле строку <строка>: если она уже есть — ничего не делает; иначе
