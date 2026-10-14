@@ -10,6 +10,9 @@ APT_CONF_DIR=/etc/apt/apt.conf.d
 APT_PACKAGES=(
   console-setup
   curl
+  docker-cli
+  docker-compose
+  docker.io
   openssh-server
   ufw
   unattended-upgrades
@@ -105,6 +108,7 @@ main() {
 
   check_debian
   install_apt_packages
+  configure_docker
   configure_linux_console
   configure_time_zone
   configure_ssh
@@ -156,6 +160,14 @@ install_apt_packages() {
   apt-get update
 
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
+}
+
+configure_docker() {
+
+  print_step_msg "Configuring Docker"
+
+  print_info_msg "Enabling and starting the Docker service"
+  systemctl enable --now docker
 }
 
 configure_ssh() {

@@ -59,8 +59,10 @@
 # - при отсутствии каталога /etc/apt/apt.conf.d скрипт завершается с ошибкой
 #   и внятным сообщением;
 # - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
-#   в алфавитном порядке;
+#   в алфавитном порядке, включая docker.io, docker-cli и docker-compose;
 # - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
+# - служба Docker включается и запускается (systemctl enable --now docker),
+#   поэтому установленные Docker и Docker Compose готовы к работе;
 # - скрипт вызывает setupcon;
 # - shellcheck не находит замечаний.
 
@@ -388,7 +390,7 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
-  [ "$(cat "${BATS_TEST_TMPDIR}/systemctl.calls")" = "reload ssh" ]
+  assert_has_line 'reload ssh' "${BATS_TEST_TMPDIR}/systemctl.calls"
 }
 
 @test "fails with a clear message when the sshd configuration directory is missing" {
@@ -458,7 +460,16 @@ dockerfile_apt_packages() {
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl openssh-server ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io openssh-server ufw unattended-upgrades' ]
+}
+
+@test "enables and starts the Docker service" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Configuring Docker"* ]]
+  [[ "$output" == *"Enabling and starting the Docker service"* ]]
+  assert_has_line 'enable --now docker' "${BATS_TEST_TMPDIR}/systemctl.calls"
 }
 
 @test "writes the kernel parameters for the router role" {

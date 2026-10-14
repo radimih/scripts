@@ -9,6 +9,9 @@ RUN apt-get update \
  && apt-get install --yes --no-install-recommends \
       console-setup \
       curl \
+      docker-cli \
+      docker-compose \
+      docker.io \
       openssh-server \
       ufw \
       unattended-upgrades \
