@@ -42,6 +42,7 @@ APT_UNATTENDED_UPGRADES_PARAMS=(
   Unattended-Upgrade::Automatic-Reboot-WithUsers=true
 )
 
+CL_BOLD='\033[1m'
 CL_GREEN='\033[0;32m'
 CL_NO='\033[0m'
 CL_RED='\033[0;31m'
@@ -71,9 +72,19 @@ SYSCTL_PARAMS=(
   net.ipv6.conf.all.disable_ipv6=1
 )
 
+# Часовой пояс
+TIME_ZONE=Asia/Novosibirsk
+
+# Каталог с базой часовых поясов
+TIME_ZONE_DIR=/usr/share/zoneinfo
+
+# Символическая ссылка, задающая часовой пояс системы
+TIME_ZONE_FILE=/etc/localtime
+
 main() {
 
   check_debian
+  configure_time_zone
   install_apt_packages
   configure_automatic_upgrades
   configure_router_sysctl
@@ -97,6 +108,23 @@ check_debian() {
     print_error_msg "... the script runs on Debian only, the current system is ${os_id:-unknown}"
     return 1
   fi
+}
+
+configure_time_zone() {
+
+  local zone_info
+
+  print_step_msg "Configuring the time zone"
+
+  zone_info="${TIME_ZONE_DIR}/${TIME_ZONE}"
+
+  if [[ ! -f "${zone_info}" ]]; then
+    print_error_msg "... the file ${zone_info} does not exist, cannot set the time zone"
+    return 1
+  fi
+
+  print_info_msg "Setting the time zone to ${CL_BOLD}${TIME_ZONE}${CL_NO} in ${TIME_ZONE_FILE}"
+  ln --symbolic --force --no-dereference "${zone_info}" "${TIME_ZONE_FILE}"
 }
 
 install_apt_packages() {
@@ -214,7 +242,7 @@ print_error_msg() {
 
 print_info_msg() {
 
-  echo "$1"
+  echo -e "$1"
 }
 
 print_step_msg() {

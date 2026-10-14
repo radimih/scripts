@@ -8,9 +8,17 @@
 #
 # Проверяется:
 #
-# - на системе, отличной от Debian, скрипт завершается с ошибкой и не трогает
-#   настройки консоли;
+# - на системе, отличной от Debian, скрипт завершается с ошибкой, не трогая
+#   настройки консоли и часовой пояс;
 # - то же самое, если ID системы не определён или нет /etc/os-release;
+# - часовой пояс задаётся символической ссылкой /etc/localtime на файл зоны
+#   /usr/share/zoneinfo/Asia/Novosibirsk, а в сообщении шага значение часового
+#   пояса выделено жирным;
+# - повторный запуск ссылку не меняет (идемпотентность);
+# - при отсутствии файла зоны скрипт завершается с ошибкой и внятным сообщением,
+#   не меняя /etc/localtime;
+# - шаг настройки часового пояса идёт до настройки автоматического обновления,
+#   поэтому уже выполнен, когда тот завершается ошибкой;
 # - параметры CODESET, FONTFACE и FONTSIZE получают нужные значения;
 # - закомментированные параметры заменяются на месте, без дубликатов;
 # - отсутствующие параметры добавляются в конец файла;
@@ -47,12 +55,20 @@ CONSOLE_SETUP_FILE="/etc/default/console-setup"
 OS_RELEASE_FILE="/etc/os-release"
 SYSCTL_DIR="/etc/sysctl.d"
 SYSCTL_FILE="${SYSCTL_DIR}/9999-router.conf"
+TIME_ZONE="Asia/Novosibirsk"
+TIME_ZONE_DIR="/usr/share/zoneinfo"
+TIME_ZONE_FILE="/etc/localtime"
+TIME_ZONE_INFO_FILE="${TIME_ZONE_DIR}/${TIME_ZONE}"
 # Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакеты
 # console-setup и unattended-upgrades: setup() восстанавливает из них исходное
-# состояние перед каждым сценарием.
+# состояние перед каждым сценарием. Сюда же — /etc/localtime и файл зоны
+# /usr/share/zoneinfo/Asia/Novosibirsk, которые правит шаг настройки часового
+# пояса.
 APT_AUTO_UPGRADES_PRISTINE="/usr/share/amnezia-test/20auto-upgrades.pristine"
 CONSOLE_SETUP_PRISTINE="/usr/share/amnezia-test/console-setup.pristine"
 OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
+TIME_ZONE_FILE_PRISTINE="/usr/share/amnezia-test/localtime.pristine"
+TIME_ZONE_INFO_PRISTINE="/usr/share/amnezia-test/novosibirsk.pristine"
 APT_UNATTENDED_UPGRADES_PRISTINE="/usr/share/amnezia-test/50unattended-upgrades.pristine"
 
 setup() {
@@ -61,6 +77,10 @@ setup() {
   cp -- "$APT_UNATTENDED_UPGRADES_PRISTINE" "$APT_UNATTENDED_UPGRADES_FILE"
   cp -- "$CONSOLE_SETUP_PRISTINE" "$CONSOLE_SETUP_FILE"
   cp -- "$OS_RELEASE_PRISTINE" "$OS_RELEASE_FILE"
+  # /etc/localtime — символическая ссылка, поэтому обычный cp записал бы через
+  # неё в файл зоны: нужны --remove-destination и --no-dereference.
+  cp --remove-destination --no-dereference "$TIME_ZONE_FILE_PRISTINE" "$TIME_ZONE_FILE"
+  cp -- "$TIME_ZONE_INFO_PRISTINE" "$TIME_ZONE_INFO_FILE"
   mkdir --parents "$SYSCTL_DIR"
   rm --force -- "$SYSCTL_FILE"
 
@@ -123,6 +143,11 @@ write_apt_conf_param() {
 # Проверяет, что в файле есть строка, целиком совпадающая с ожидаемой.
 assert_has_line() {
   grep --fixed-strings --line-regexp --quiet -- "$1" "$2"
+}
+
+# Проверяет, что <путь> — символическая ссылка на <цель>.
+assert_symlink_target() {
+  [ "$(readlink -- "$1")" = "$2" ]
 }
 
 # Пакеты из APT_PACKAGES в скрипте, по одному в строке.
@@ -230,6 +255,8 @@ dockerfile_apt_packages() {
   [[ "$output" == *"the current system is ubuntu"* ]]
   # Настройка консоли не выполняется: проверка ОС идёт первой.
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+  # Часовой пояс тоже не меняется: его шаг идёт сразу после проверки ОС.
+  assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
 }
 
 @test "fails when the system ID cannot be determined" {
@@ -251,6 +278,40 @@ dockerfile_apt_packages() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot detect the operating system"* ]]
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+}
+
+@test "sets the time zone to Asia/Novosibirsk" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Значение часового пояса выводится выделенным (жирным).
+  local bold=$'\033[1m'
+  local reset=$'\033[0m'
+  [[ "$output" == *"Setting the time zone to ${bold}${TIME_ZONE}${reset} in ${TIME_ZONE_FILE}"* ]]
+  assert_symlink_target "$TIME_ZONE_FILE" "$TIME_ZONE_INFO_FILE"
+}
+
+@test "is idempotent for the time zone: a second run does not change the link" {
+  run "$SCRIPT_UNDER_TEST"
+  [ "$status" -eq 0 ]
+  local target_after_first
+  target_after_first="$(readlink -- "$TIME_ZONE_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  assert_symlink_target "$TIME_ZONE_FILE" "$target_after_first"
+}
+
+@test "fails with a clear message when the time zone data is missing" {
+  rm -- "$TIME_ZONE_INFO_FILE"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$TIME_ZONE_INFO_FILE"* ]]
+  # Файл зоны проверяется до правки ссылки, поэтому /etc/localtime не тронут.
+  assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
 }
 
 @test "updates the package database and installs the packages in alphabetical order" {
@@ -413,6 +474,8 @@ EOF
   [[ "$output" == *"$APT_CONF_DIR"* ]]
   # Шаг идёт раньше настройки консоли, поэтому она не выполняется.
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+  # Настройка часового пояса идёт ещё раньше, поэтому уже выполнена.
+  assert_symlink_target "$TIME_ZONE_FILE" "$TIME_ZONE_INFO_FILE"
 }
 
 @test "installs in the test image the same packages as the script" {

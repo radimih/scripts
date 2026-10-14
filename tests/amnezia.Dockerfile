@@ -15,12 +15,15 @@ RUN apt-get update \
 
 # Копии /etc/default/console-setup (в том виде, в каком его ставит пакет
 # console-setup), /etc/os-release (в том виде, в каком его ставит базовый
-# образ) и файлов /etc/apt/apt.conf.d/20auto-upgrades,
+# образ), /etc/localtime и файла зоны /usr/share/zoneinfo/Asia/Novosibirsk, а
+# также файлов /etc/apt/apt.conf.d/20auto-upgrades и
 # /etc/apt/apt.conf.d/50unattended-upgrades (в том виде, в каком их ставит
 # пакет unattended-upgrades): тесты восстанавливают из них исходное состояние
 # перед каждым сценарием.
 RUN mkdir --parents /usr/share/amnezia-test \
  && cp /etc/default/console-setup /usr/share/amnezia-test/console-setup.pristine \
  && cp /etc/os-release /usr/share/amnezia-test/os-release.pristine \
+ && cp --no-dereference /etc/localtime /usr/share/amnezia-test/localtime.pristine \
+ && cp /usr/share/zoneinfo/Asia/Novosibirsk /usr/share/amnezia-test/novosibirsk.pristine \
  && cp /etc/apt/apt.conf.d/20auto-upgrades /usr/share/amnezia-test/20auto-upgrades.pristine \
  && cp /etc/apt/apt.conf.d/50unattended-upgrades /usr/share/amnezia-test/50unattended-upgrades.pristine
