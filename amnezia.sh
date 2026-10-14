@@ -4,12 +4,42 @@ set -euo pipefail
 
 # Скрипт предполагает запуск от имени пользователя root
 
+APT_CONF_DIR=/etc/apt/apt.conf.d
+
 # Устанавливаемые apt-пакеты в алфавитном порядке
 APT_PACKAGES=(
   console-setup
   curl
   ufw
   unattended-upgrades
+)
+
+# Файл настройки автоматического обновления: включение обновлений списка
+# пакетов и их автоматической установки
+APT_AUTO_UPGRADES_FILE=${APT_CONF_DIR}/20auto-upgrades
+
+# Параметры автоматического обновления в форме <параметр>=<значение>, в порядке
+# записи в файл
+APT_AUTO_UPGRADES_PARAMS=(
+  APT::Periodic::Update-Package-Lists=1
+  APT::Periodic::Unattended-Upgrade=1
+  APT::Periodic::AutocleanInterval=7
+)
+
+# Файл настройки автоматической перезагрузки и очистки после установки
+# обновлений
+APT_UNATTENDED_UPGRADES_FILE=${APT_CONF_DIR}/50unattended-upgrades
+
+# Параметры автоматической перезагрузки и очистки в форме
+# <параметр>=<значение>, в порядке записи в файл: удаление неиспользуемых
+# зависимостей и старых ядер, перезагрузка в 05:00 даже при залогиненных
+# пользователях
+APT_UNATTENDED_UPGRADES_PARAMS=(
+  Unattended-Upgrade::Remove-Unused-Kernel-Packages=true
+  Unattended-Upgrade::Remove-Unused-Dependencies=true
+  Unattended-Upgrade::Automatic-Reboot=true
+  Unattended-Upgrade::Automatic-Reboot-Time=05:00
+  Unattended-Upgrade::Automatic-Reboot-WithUsers=true
 )
 
 CL_GREEN='\033[0;32m'
@@ -45,6 +75,7 @@ main() {
 
   check_debian
   install_apt_packages
+  configure_automatic_upgrades
   configure_router_sysctl
   configure_linux_console
 }
@@ -77,18 +108,44 @@ install_apt_packages() {
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
 }
 
+configure_automatic_upgrades() {
+
+  local key
+  local param
+
+  print_step_msg "Configuring automatic upgrades"
+
+  if [[ ! -d "${APT_CONF_DIR}" ]]; then
+    print_error_msg "... the directory ${APT_CONF_DIR} does not exist, cannot configure automatic upgrades"
+    return 1
+  fi
+
+  print_info_msg "Updating ${APT_AUTO_UPGRADES_FILE}"
+  for param in "${APT_AUTO_UPGRADES_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_apt_conf_param "${APT_AUTO_UPGRADES_FILE}" "${key}" "${key} \"${param#*=}\";"
+  done
+
+  print_info_msg "Updating ${APT_UNATTENDED_UPGRADES_FILE}"
+  for param in "${APT_UNATTENDED_UPGRADES_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_apt_conf_param "${APT_UNATTENDED_UPGRADES_FILE}" "${key}" "${key} \"${param#*=}\";"
+  done
+}
+
 configure_router_sysctl() {
 
   local param
   local key
 
-  print_step_msg "Configuring kernel parameters for routing (${SYSCTL_FILE})"
+  print_step_msg "Configuring kernel parameters for routing"
 
   if [[ ! -d "${SYSCTL_DIR}" ]]; then
     print_error_msg "... the directory ${SYSCTL_DIR} does not exist, cannot write ${SYSCTL_FILE}"
     return 1
   fi
 
+  print_info_msg "Updating ${SYSCTL_FILE}"
   for param in "${SYSCTL_PARAMS[@]}"; do
     key="${param%%=*}"
     set_config_param "${SYSCTL_FILE}" "${key}" "${key} = ${param#*=}"
@@ -101,13 +158,14 @@ configure_linux_console() {
 
   local key
 
-  print_step_msg "Configuring the Linux console (${CONSOLE_SETUP_FILE})"
+  print_step_msg "Configuring the Linux console"
 
   if [[ ! -f "${CONSOLE_SETUP_FILE}" ]]; then
     print_error_msg "... the file ${CONSOLE_SETUP_FILE} does not exist, install the console-setup package first"
     return 1
   fi
 
+  print_info_msg "Updating ${CONSOLE_SETUP_FILE}"
   for key in "${!CONSOLE_SETUP_PARAMS[@]}"; do
     set_config_param "${CONSOLE_SETUP_FILE}" "${key}" "${key}=\"${CONSOLE_SETUP_PARAMS[${key}]}\""
   done
@@ -115,24 +173,36 @@ configure_linux_console() {
   setupcon
 }
 
-set_config_param() {
+# Задаёт в файле строку <строка>: если она уже есть — ничего не делает; иначе
+# заменяет строку, подходящую под шаблон <шаблон> (в том числе
+# закомментированную), или добавляет <строка> последней строкой файла
+set_config_line() {
 
   local file="$1"
-  local key="$2"
-  local assignment="$3"
+  local pattern="$2"
+  local line="$3"
 
-  # Если значение параметра уже установлено
-  if grep --silent --no-messages --fixed-strings --line-regexp -- "${assignment}" "${file}"; then
+  if grep --silent --no-messages --fixed-strings --line-regexp -- "${line}" "${file}"; then
     return 0
   fi
 
-  # Заменить существующий параметр, даже если он закомментирован; если параметра
-  # нет — добавить его последней строкой файла
-  if grep --silent --no-messages --extended-regexp "^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=" "${file}"; then
-    sed --in-place --regexp-extended "s|^[[:space:]]*#?[[:space:]]*${key}[[:space:]]*=.*|${assignment}|" "${file}"
+  if grep --silent --no-messages --extended-regexp -- "${pattern}" "${file}"; then
+    sed --in-place --regexp-extended "s|${pattern}.*|${line}|" "${file}"
   else
-    echo "${assignment}" >> "${file}"
+    echo "${line}" >> "${file}"
   fi
+}
+
+# Задаёт параметр вида <параметр>=<значение> (файлы sysctl и console-setup)
+set_config_param() {
+
+  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]*=" "$3"
+}
+
+# Задаёт параметр вида <параметр> "<значение>"; (файлы apt.conf)
+set_apt_conf_param() {
+
+  set_config_line "$1" "^[[:space:]]*(//)?[[:space:]]*$2[[:space:]]+" "$3"
 }
 
 print_error_msg() {
@@ -140,6 +210,11 @@ print_error_msg() {
   echo
   echo -e "${CL_RED}$1${CL_NO}"
   echo
+}
+
+print_info_msg() {
+
+  echo "$1"
 }
 
 print_step_msg() {

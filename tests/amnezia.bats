@@ -23,6 +23,16 @@
 # - параметры ядра применяются вызовом sysctl --load с этим файлом;
 # - при отсутствии каталога /etc/sysctl.d скрипт завершается с ошибкой
 #   и внятным сообщением, не трогая настройки консоли;
+# - параметры автоматического обновления записываются в
+#   /etc/apt/apt.conf.d/20auto-upgrades, параметры автоматической перезагрузки и
+#   очистки — в /etc/apt/apt.conf.d/50unattended-upgrades: удаляются неиспользуемые
+#   зависимости и старые ядра, перезагрузка разрешена в 05:00 даже при
+#   залогиненных пользователях, старые пакеты из кеша удаляются раз в неделю,
+#   закомментированные строки заменяются на месте, повторный запуск файлы не
+#   меняет;
+# - перед записью каждого файла скрипт сообщает, какой файл обновляет;
+# - при отсутствии каталога /etc/apt/apt.conf.d скрипт завершается с ошибкой
+#   и внятным сообщением, не трогая настройки консоли;
 # - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
 #   в алфавитном порядке;
 # - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
@@ -30,17 +40,25 @@
 # - shellcheck не находит замечаний.
 
 SCRIPT_UNDER_TEST="${BATS_TEST_DIRNAME}/../amnezia.sh"
+APT_CONF_DIR="/etc/apt/apt.conf.d"
+APT_AUTO_UPGRADES_FILE="${APT_CONF_DIR}/20auto-upgrades"
+APT_UNATTENDED_UPGRADES_FILE="${APT_CONF_DIR}/50unattended-upgrades"
 CONSOLE_SETUP_FILE="/etc/default/console-setup"
 OS_RELEASE_FILE="/etc/os-release"
 SYSCTL_DIR="/etc/sysctl.d"
 SYSCTL_FILE="${SYSCTL_DIR}/9999-router.conf"
-# Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакет
-# console-setup: setup() восстанавливает из них исходное состояние перед каждым
-# сценарием.
+# Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакеты
+# console-setup и unattended-upgrades: setup() восстанавливает из них исходное
+# состояние перед каждым сценарием.
+APT_AUTO_UPGRADES_PRISTINE="/usr/share/amnezia-test/20auto-upgrades.pristine"
 CONSOLE_SETUP_PRISTINE="/usr/share/amnezia-test/console-setup.pristine"
 OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
+APT_UNATTENDED_UPGRADES_PRISTINE="/usr/share/amnezia-test/50unattended-upgrades.pristine"
 
 setup() {
+  mkdir --parents "$APT_CONF_DIR"
+  cp -- "$APT_AUTO_UPGRADES_PRISTINE" "$APT_AUTO_UPGRADES_FILE"
+  cp -- "$APT_UNATTENDED_UPGRADES_PRISTINE" "$APT_UNATTENDED_UPGRADES_FILE"
   cp -- "$CONSOLE_SETUP_PRISTINE" "$CONSOLE_SETUP_FILE"
   cp -- "$OS_RELEASE_PRISTINE" "$OS_RELEASE_FILE"
   mkdir --parents "$SYSCTL_DIR"
@@ -91,6 +109,17 @@ count_exact_lines() {
   grep --fixed-strings --line-regexp --count -- "$1" "$2" || true
 }
 
+# Перезаписывает строку параметра apt.conf целиком (строка может быть
+# закомментирована через //).
+write_apt_conf_param() {
+  local file="$1"
+  local assignment="$2"
+  local key="${assignment%% *}"
+
+  sed --in-place --regexp-extended \
+      "s|^[[:space:]]*(//)?[[:space:]]*${key}[[:space:]]+.*|${assignment}|" "$file"
+}
+
 # Проверяет, что в файле есть строка, целиком совпадающая с ожидаемой.
 assert_has_line() {
   grep --fixed-strings --line-regexp --quiet -- "$1" "$2"
@@ -121,6 +150,7 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
+  [[ "$output" == *"Updating ${CONSOLE_SETUP_FILE}"* ]]
   assert_has_line 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE"
   assert_has_line 'FONTFACE="Terminus"' "$CONSOLE_SETUP_FILE"
   assert_has_line 'FONTSIZE="8x16"' "$CONSOLE_SETUP_FILE"
@@ -237,6 +267,7 @@ dockerfile_apt_packages() {
   run "$SCRIPT_UNDER_TEST"
 
   [ "$status" -eq 0 ]
+  [[ "$output" == *"Updating ${SYSCTL_FILE}"* ]]
   assert_has_line 'net.core.default_qdisc = fq' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE"
@@ -297,6 +328,89 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$SYSCTL_DIR"* ]]
+  # Шаг идёт раньше настройки консоли, поэтому она не выполняется.
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+}
+
+@test "enables upgrades, removal of unused packages and a reboot at 05:00" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Перед записью каждого файла скрипт сообщает, какой файл обновляет.
+  [[ "$output" == *"Updating ${APT_AUTO_UPGRADES_FILE}"* ]]
+  [[ "$output" == *"Updating ${APT_UNATTENDED_UPGRADES_FILE}"* ]]
+  assert_has_line 'APT::Periodic::Update-Package-Lists "1";' "$APT_AUTO_UPGRADES_FILE"
+  assert_has_line 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES_FILE"
+  assert_has_line 'APT::Periodic::AutocleanInterval "7";' "$APT_AUTO_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Automatic-Reboot "true";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Automatic-Reboot-Time "05:00";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Automatic-Reboot-WithUsers "true";' "$APT_UNATTENDED_UPGRADES_FILE"
+  # Каждый из изменённых параметров задан ровно один раз.
+  [ "$(count_exact_lines 'APT::Periodic::Update-Package-Lists "1";' "$APT_AUTO_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'APT::Periodic::AutocleanInterval "7";' "$APT_AUTO_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Automatic-Reboot "true";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Automatic-Reboot-Time "05:00";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Automatic-Reboot-WithUsers "true";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+}
+
+@test "replaces commented-out automatic upgrade settings in place" {
+  # Штатный файл содержит закомментированные настройки перезагрузки и очистки.
+  assert_has_line '//Unattended-Upgrade::Automatic-Reboot "false";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line '//Unattended-Upgrade::Automatic-Reboot-Time "02:00";' "$APT_UNATTENDED_UPGRADES_FILE"
+  assert_has_line '//Unattended-Upgrade::Remove-Unused-Dependencies "false";' "$APT_UNATTENDED_UPGRADES_FILE"
+  local lines_before
+  lines_before="$(wc --lines < "$APT_UNATTENDED_UPGRADES_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(count_exact_lines '//Unattended-Upgrade::Automatic-Reboot "false";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 0 ]
+  [ "$(count_exact_lines '//Unattended-Upgrade::Automatic-Reboot-Time "02:00";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 0 ]
+  [ "$(count_exact_lines '//Unattended-Upgrade::Remove-Unused-Dependencies "false";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 0 ]
+  # Строки заменены на месте, а не добавлены в конец файла.
+  [ "$(wc --lines < "$APT_UNATTENDED_UPGRADES_FILE")" -eq "$lines_before" ]
+}
+
+@test "rewrites automatic upgrade settings that are already active" {
+  write_apt_conf_param "$APT_AUTO_UPGRADES_FILE" 'APT::Periodic::Unattended-Upgrade "0";'
+  write_apt_conf_param "$APT_UNATTENDED_UPGRADES_FILE" 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";'
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  assert_has_line 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES_FILE"
+  assert_has_line 'Unattended-Upgrade::Automatic-Reboot-Time "05:00";' "$APT_UNATTENDED_UPGRADES_FILE"
+  [ "$(count_exact_lines 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'Unattended-Upgrade::Automatic-Reboot-Time "05:00";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 1 ]
+}
+
+@test "is idempotent for the automatic upgrade files: a second run does not change them" {
+  run "$SCRIPT_UNDER_TEST"
+  [ "$status" -eq 0 ]
+  local auto_upgrades_after
+  local unattended_upgrades_after
+  auto_upgrades_after="$(sha256sum "$APT_AUTO_UPGRADES_FILE")"
+  unattended_upgrades_after="$(sha256sum "$APT_UNATTENDED_UPGRADES_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$APT_AUTO_UPGRADES_FILE")" = "$auto_upgrades_after" ]
+  [ "$(sha256sum "$APT_UNATTENDED_UPGRADES_FILE")" = "$unattended_upgrades_after" ]
+}
+
+@test "fails with a clear message when the apt configuration directory is missing" {
+  rm --recursive --force -- "$APT_CONF_DIR"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$APT_CONF_DIR"* ]]
   # Шаг идёт раньше настройки консоли, поэтому она не выполняется.
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
 }
