@@ -101,12 +101,12 @@ TIME_ZONE_FILE=/etc/localtime
 main() {
 
   check_debian
-  configure_time_zone
   install_apt_packages
+  configure_linux_console
+  configure_time_zone
   configure_ssh
   configure_automatic_upgrades
   configure_router_sysctl
-  configure_linux_console
 }
 
 check_debian() {
