@@ -38,7 +38,7 @@ SYSCTL_PARAMS=(
   net.ipv4.tcp_congestion_control=bbr
   net.ipv4.tcp_keepalive_probes=1
   net.ipv4.tcp_mtu_probing=1
-  net.ipv6.conf.all.forwarding=1
+  net.ipv6.conf.all.disable_ipv6=1
 )
 
 main() {

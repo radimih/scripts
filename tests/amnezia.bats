@@ -242,7 +242,7 @@ dockerfile_apt_packages() {
   assert_has_line 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.tcp_keepalive_probes = 1' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.tcp_mtu_probing = 1' "$SYSCTL_FILE"
-  assert_has_line 'net.ipv6.conf.all.forwarding = 1' "$SYSCTL_FILE"
+  assert_has_line 'net.ipv6.conf.all.disable_ipv6 = 1' "$SYSCTL_FILE"
   # Записаны только заданные параметры, по одному в строке.
   [ "$(wc --lines < "$SYSCTL_FILE")" -eq 6 ]
 }
