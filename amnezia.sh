@@ -13,7 +13,10 @@ APT_PACKAGES=(
   docker-cli
   docker-compose
   docker.io
+  openssh-client
   openssh-server
+  qrencode
+  sudo
   ufw
   unattended-upgrades
 )
@@ -47,6 +50,7 @@ APT_UNATTENDED_UPGRADES_PARAMS=(
 )
 
 CL_BOLD='\033[1m'
+CL_CLEAR='\033[H\033[2J'
 CL_GREEN='\033[0;32m'
 CL_NO='\033[0m'
 CL_RED='\033[0;31m'
@@ -77,6 +81,18 @@ SSHD_CONFIG_PARAMS=(
   PasswordAuthentication=no
   PermitRootLogin=no
 )
+
+# Каталог с дополнительными настройками sudo
+SUDOERS_DIR=/etc/sudoers.d
+
+# Файл дополнительных настроек sudo: полные права без пароля для суперпользователя
+SUDOERS_FILE=${SUDOERS_DIR}/00-superuser
+
+# Оболочка суперпользователя
+SUPERUSER_SHELL=/bin/bash
+
+# Имя файла SSH-ключа суперпользователя в каталоге ~/.ssh
+SUPERUSER_SSH_KEY_NAME=id_ed25519
 
 SYSCTL_DIR=/etc/sysctl.d
 SYSCTL_FILE=${SYSCTL_DIR}/9999-router.conf
@@ -115,6 +131,7 @@ main() {
   configure_ssh
   configure_firewall
   configure_docker
+  configure_superuser
 }
 
 check_debian() {
@@ -274,6 +291,138 @@ configure_docker() {
 
   print_info_msg "Enabling and starting the Docker service"
   systemctl enable --now docker
+}
+
+configure_superuser() {
+
+  local home_dir
+  local key_dir
+  local key_file
+
+  print_step_msg "Configuring the superuser"
+
+  if [[ ! -d "${SUDOERS_DIR}" ]]; then
+    print_error_msg "... the directory ${SUDOERS_DIR} does not exist, install the sudo package first"
+    return 1
+  fi
+
+  ask_superuser_name
+
+  if user_exists "${SUPERUSER_NAME}"; then
+    print_info_msg "The user ${CL_BOLD}${SUPERUSER_NAME}${CL_NO} already exists"
+  else
+    print_info_msg "Creating the user ${CL_BOLD}${SUPERUSER_NAME}${CL_NO}"
+    useradd --create-home --shell "${SUPERUSER_SHELL}" "${SUPERUSER_NAME}"
+  fi
+
+  print_info_msg "Granting full rights without a password in ${SUDOERS_FILE}"
+  printf '%s ALL=(ALL:ALL) NOPASSWD:ALL\n' "${SUPERUSER_NAME}" > "${SUDOERS_FILE}"
+  chmod 0440 "${SUDOERS_FILE}"
+
+  home_dir="$(user_home_dir "${SUPERUSER_NAME}")"
+  key_dir="${home_dir}/.ssh"
+  key_file="${key_dir}/${SUPERUSER_SSH_KEY_NAME}"
+
+  ensure_superuser_ssh_key "${key_dir}" "${key_file}"
+  authorize_superuser_ssh_key "${key_dir}" "${key_file}.pub"
+  show_superuser_ssh_key "${key_file}"
+}
+
+# Спрашивает имя суперпользователя, пока не введено допустимое, и записывает его в
+# SUPERUSER_NAME; кончается неудачей, если ввод закончился (например, скрипт
+# запущен без терминала)
+ask_superuser_name() {
+
+  local name
+
+  while true; do
+    if ! read -r -p "Enter the superuser name: " name; then
+      print_error_msg "... no user name was entered"
+      return 1
+    fi
+
+    if is_valid_superuser_name "${name}"; then
+      SUPERUSER_NAME="${name}"
+      return 0
+    fi
+
+    print_info_msg "... the user name ${CL_BOLD}${name}${CL_NO} is invalid: use up to 32 lowercase latin letters, digits, underscores and hyphens, starting with a letter"
+  done
+}
+
+# Проверяет, что имя годится для useradd: до 32 символов, начинается со строчной
+# латинской буквы, дальше идут строчные латинские буквы, цифры, подчёркивания и
+# дефисы (NAME_REGEX из /etc/adduser.conf)
+is_valid_superuser_name() {
+
+  [[ ${#1} -le 32 && "$1" =~ ^[a-z][a-z0-9_-]*$ ]]
+}
+
+# Проверяет, что пользователь с таким именем есть в базе пользователей
+user_exists() {
+
+  id --user "$1" >/dev/null 2>&1
+}
+
+# Домашний каталог пользователя
+user_home_dir() {
+
+  getent passwd "$1" | cut --delimiter=: --fields=6
+}
+
+# Генерирует ключ ed25519 без пароля, если у суперпользователя ещё нет ключа
+ensure_superuser_ssh_key() {
+
+  local key_dir="$1"
+  local key_file="$2"
+
+  if [[ -f "${key_file}" ]]; then
+    print_info_msg "The user ${CL_BOLD}${SUPERUSER_NAME}${CL_NO} already has the SSH key ${key_file}, keeping it"
+    return 0
+  fi
+
+  print_info_msg "Generating an ed25519 SSH key without a passphrase in ${key_file}"
+  install --directory --mode 0700 --owner "${SUPERUSER_NAME}" --group "${SUPERUSER_NAME}" "${key_dir}"
+  ssh-keygen -t ed25519 -N '' -C "${SUPERUSER_NAME}@$(hostname)" -f "${key_file}" -q
+  chown "${SUPERUSER_NAME}:${SUPERUSER_NAME}" "${key_file}" "${key_file}.pub"
+}
+
+# Разрешает вход суперпользователю по его ключу, добавляя публичный ключ в
+# authorized_keys (без дубликатов)
+authorize_superuser_ssh_key() {
+
+  local key_dir="$1"
+  local pub_key_file="$2"
+  local authorized_keys_file="${key_dir}/authorized_keys"
+  local pub_key
+
+  if [[ ! -f "${pub_key_file}" ]]; then
+    print_error_msg "... the file ${pub_key_file} does not exist, cannot authorize the SSH key"
+    return 1
+  fi
+
+  pub_key="$(< "${pub_key_file}")"
+
+  if grep --silent --no-messages --fixed-strings --line-regexp -- "${pub_key}" \
+      "${authorized_keys_file}"; then
+    print_info_msg "The key is already authorized in ${authorized_keys_file}"
+  else
+    print_info_msg "Authorizing the key in ${authorized_keys_file}"
+    echo "${pub_key}" >> "${authorized_keys_file}"
+  fi
+
+  chmod 0600 "${authorized_keys_file}"
+  chown "${SUPERUSER_NAME}:${SUPERUSER_NAME}" "${authorized_keys_file}"
+}
+
+# Очищает экран и выводит подпись User name: с именем суперпользователя,
+# выделенным жирным, заголовок SSH private key: и QR-код его приватного ключа с
+# полем в два символа
+show_superuser_ssh_key() {
+
+  printf "${CL_CLEAR}User name: ${CL_BOLD}%s${CL_NO}\\n" "${SUPERUSER_NAME}"
+  printf 'SSH private key:\n'
+  qrencode -t UTF8 --margin=2 < "$1"
 }
 
 # Задаёт в файле строку <строка>: если она уже есть — ничего не делает; иначе

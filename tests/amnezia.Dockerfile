@@ -12,7 +12,10 @@ RUN apt-get update \
       docker-cli \
       docker-compose \
       docker.io \
+      openssh-client \
       openssh-server \
+      qrencode \
+      sudo \
       ufw \
       unattended-upgrades \
  && rm -rf /var/lib/apt/lists/*

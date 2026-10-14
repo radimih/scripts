@@ -65,6 +65,22 @@
 #   (systemctl enable --now docker), поэтому установленные Docker и Docker
 #   Compose готовы к работе;
 # - скрипт вызывает setupcon;
+# - скрипт спрашивает имя суперпользователя, пока не введено допустимое:
+#   недопустимое имя отвергается с внятным сообщением, а при отсутствии ввода
+#   скрипт завершается с ошибкой;
+# - пользователь создаётся с домашним каталогом и оболочкой bash, если его ещё
+#   нет, и не пересоздаётся, если он есть;
+# - суперпользователю выдаются полные права без пароля (файл
+#   /etc/sudoers.d/00-superuser), что проверяется запуском sudo без пароля;
+# - если у суперпользователя нет SSH-ключа, генерируется ключ ed25519 без пароля
+#   с правами 0600 и владельцем-пользователем; существующий ключ сохраняется;
+# - публичный ключ суперпользователя добавляется в ~/.ssh/authorized_keys (без
+#   дубликатов) с правами 0600, поэтому ключом можно войти по SSH;
+# - при отсутствии каталога /etc/sudoers.d скрипт завершается с ошибкой и внятным
+#   сообщением, не создавая пользователя (шаг идёт последним);
+# - в конце экран очищается и выводятся подпись User name: с именем
+#   суперпользователя, заголовок SSH private key: и QR-код приватного ключа с
+#   полем в два символа (qrencode -t UTF8 --margin=2);
 # - shellcheck не находит замечаний.
 
 SCRIPT_UNDER_TEST="${BATS_TEST_DIRNAME}/../amnezia.sh"
@@ -82,6 +98,15 @@ TIME_ZONE_DIR="/usr/share/zoneinfo"
 TIME_ZONE_FILE="/etc/localtime"
 TIME_ZONE_INFO_FILE="${TIME_ZONE_DIR}/${TIME_ZONE}"
 UFW_DIR="/etc/ufw"
+SUDOERS_DIR="/etc/sudoers.d"
+SUDOERS_FILE="${SUDOERS_DIR}/00-superuser"
+SUPERUSER_NAME="vpnuser"
+SUPERUSER_SHELL="/bin/bash"
+SUPERUSER_HOME="/home/${SUPERUSER_NAME}"
+SUPERUSER_KEY_FILE="${SUPERUSER_HOME}/.ssh/id_ed25519"
+SUPERUSER_AUTHORIZED_KEYS_FILE="${SUPERUSER_HOME}/.ssh/authorized_keys"
+# Последовательность очистки экрана в скрипте (CL_CLEAR).
+CLEAR_SCREEN=$'\033[H\033[2J'
 # Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакеты
 # console-setup и unattended-upgrades: setup() восстанавливает из них исходное
 # состояние перед каждым сценарием. Сюда же — /etc/localtime и файл зоны
@@ -113,6 +138,15 @@ setup() {
   # Каталог с настройками ufw: скрипт только проверяет его наличие и вызывает
   # команду ufw (заглушённую), поэтому достаточно восстановить каталог.
   mkdir --parents "$UFW_DIR"
+  # Пользователь-суперпользователь, его домашний каталог и настройка sudo:
+  # скрипт их создаёт, поэтому перед каждым сценарием возвращаем систему в
+  # исходное состояние.
+  if getent passwd "$SUPERUSER_NAME" >/dev/null; then
+    userdel --remove --force "$SUPERUSER_NAME" >/dev/null 2>&1 || true
+  fi
+  rm --recursive --force -- "$SUPERUSER_HOME"
+  mkdir --parents "$SUDOERS_DIR"
+  rm --force -- "$SUDOERS_FILE"
 
   # apt-get, sysctl, systemctl и ufw не выполняются по-настоящему: тесты
   # проверяют не установку пакетов и не применение настроек, а то, как скрипт их
@@ -175,6 +209,16 @@ assert_has_line() {
   grep --fixed-strings --line-regexp --quiet -- "$1" "$2"
 }
 
+# Запускает скрипт, подавая на вход имя суперпользователя.
+run_script() {
+  run "$SCRIPT_UNDER_TEST" <<< "$SUPERUSER_NAME"
+}
+
+# QR-код ключа в том виде, в каком его выводит скрипт: с полем в два символа.
+key_qr_code() {
+  qrencode -t UTF8 --margin=2 < "$1"
+}
+
 # Проверяет, что <путь> — символическая ссылка на <цель>.
 assert_symlink_target() {
   [ "$(readlink -- "$1")" = "$2" ]
@@ -202,7 +246,7 @@ dockerfile_apt_packages() {
   write_param FONTFACE 'FONTFACE="LatArCyrHeb-16"'
   write_param FONTSIZE 'FONTSIZE="16x32"'
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Updating ${CONSOLE_SETUP_FILE}"* ]]
@@ -225,7 +269,7 @@ dockerfile_apt_packages() {
   local lines_before
   lines_before="$(wc --lines < "$CONSOLE_SETUP_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(count_exact_lines 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
@@ -243,7 +287,7 @@ dockerfile_apt_packages() {
   local lines_before
   lines_before="$(wc --lines < "$CONSOLE_SETUP_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(count_exact_lines 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE")" -eq 1 ]
@@ -253,12 +297,12 @@ dockerfile_apt_packages() {
 }
 
 @test "is idempotent: a second run does not change the file" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local after_first
   after_first="$(sha256sum "$CONSOLE_SETUP_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$CONSOLE_SETUP_FILE")" = "$after_first" ]
@@ -270,7 +314,7 @@ dockerfile_apt_packages() {
 @test "fails with a clear message when the configuration file is missing" {
   rm -- "$CONSOLE_SETUP_FILE"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$CONSOLE_SETUP_FILE"* ]]
@@ -279,7 +323,7 @@ dockerfile_apt_packages() {
 @test "fails on a system that is not Debian" {
   printf 'ID=ubuntu\n' > "$OS_RELEASE_FILE"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"the current system is ubuntu"* ]]
@@ -292,7 +336,7 @@ dockerfile_apt_packages() {
 @test "fails when the system ID cannot be determined" {
   printf 'NAME="Some OS"\n' > "$OS_RELEASE_FILE"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"the current system is unknown"* ]]
@@ -303,7 +347,7 @@ dockerfile_apt_packages() {
 @test "fails when the OS release file is missing" {
   rm -- "$OS_RELEASE_FILE"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot detect the operating system"* ]]
@@ -311,7 +355,7 @@ dockerfile_apt_packages() {
 }
 
 @test "sets the time zone to Asia/Novosibirsk" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Значение часового пояса выводится выделенным (жирным).
@@ -322,12 +366,12 @@ dockerfile_apt_packages() {
 }
 
 @test "is idempotent for the time zone: a second run does not change the link" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local target_after_first
   target_after_first="$(readlink -- "$TIME_ZONE_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   assert_symlink_target "$TIME_ZONE_FILE" "$target_after_first"
@@ -336,7 +380,7 @@ dockerfile_apt_packages() {
 @test "fails with a clear message when the time zone data is missing" {
   rm -- "$TIME_ZONE_INFO_FILE"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$TIME_ZONE_INFO_FILE"* ]]
@@ -345,7 +389,7 @@ dockerfile_apt_packages() {
 }
 
 @test "writes the SSH settings into a drop-in file and they take effect" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Updating ${SSHD_CONFIG_FILE}"* ]]
@@ -366,7 +410,7 @@ dockerfile_apt_packages() {
   printf 'PasswordAuthentication yes\nPermitRootLogin prohibit-password\n' \
       > "${SSHD_CONFIG_DIR}/50-cloud-init.conf"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   local effective
@@ -376,19 +420,19 @@ dockerfile_apt_packages() {
 }
 
 @test "is idempotent for the SSH settings: a second run does not change the file" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local after_first
   after_first="$(sha256sum "$SSHD_CONFIG_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$SSHD_CONFIG_FILE")" = "$after_first" ]
 }
 
 @test "applies the SSH settings by reloading sshd" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   assert_has_line 'reload ssh' "${BATS_TEST_TMPDIR}/systemctl.calls"
@@ -397,7 +441,7 @@ dockerfile_apt_packages() {
 @test "fails with a clear message when the sshd configuration directory is missing" {
   rm --recursive --force -- "$SSHD_CONFIG_DIR"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$SSHD_CONFIG_DIR"* ]]
@@ -410,7 +454,7 @@ dockerfile_apt_packages() {
 }
 
 @test "leaves only ssh open for incoming connections and allows all outgoing ones" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Denying incoming connections except ssh and allowing outgoing and routed connections"* ]]
@@ -423,7 +467,7 @@ dockerfile_apt_packages() {
 }
 
 @test "forwards traffic of vpn clients" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Транзитный трафик клиентов VPN должен проходить: политика по умолчанию для
@@ -432,12 +476,12 @@ dockerfile_apt_packages() {
 }
 
 @test "applies the firewall rules again on a second run without changing them" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local first_run
   first_run="$(cat "${BATS_TEST_TMPDIR}/ufw.calls")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Скрипт каждый раз задаёт одни и те же правила, поэтому повторный запуск
@@ -448,7 +492,7 @@ dockerfile_apt_packages() {
 @test "fails with a clear message when the ufw configuration directory is missing" {
   rm --recursive --force -- "$UFW_DIR"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$UFW_DIR"* ]]
@@ -459,17 +503,17 @@ dockerfile_apt_packages() {
 }
 
 @test "updates the package database and installs the packages in alphabetical order" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io openssh-server ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io openssh-client openssh-server qrencode sudo ufw unattended-upgrades' ]
 }
 
 @test "enables and starts the Docker service as the last step" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Configuring Docker"* ]]
@@ -481,7 +525,7 @@ dockerfile_apt_packages() {
 }
 
 @test "writes the kernel parameters for the router role" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Updating ${SYSCTL_FILE}"* ]]
@@ -505,7 +549,7 @@ EOF
   local lines_before
   lines_before="$(wc --lines < "$SYSCTL_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Строки с нашими ключами заменены на месте, в том числе закомментированная.
@@ -520,19 +564,19 @@ EOF
 }
 
 @test "is idempotent for the kernel parameters file: a second run does not change it" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local after_first
   after_first="$(sha256sum "$SYSCTL_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$SYSCTL_FILE")" = "$after_first" ]
 }
 
 @test "applies the kernel parameters by running sysctl --load" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(cat "${BATS_TEST_TMPDIR}/sysctl.calls")" = "--load=${SYSCTL_FILE}" ]
@@ -541,7 +585,7 @@ EOF
 @test "fails with a clear message when the kernel parameters directory is missing" {
   rm --recursive --force -- "$SYSCTL_DIR"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$SYSCTL_DIR"* ]]
@@ -550,7 +594,7 @@ EOF
 }
 
 @test "enables upgrades, removal of unused packages and a reboot at 05:00" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   # Перед записью каждого файла скрипт сообщает, какой файл обновляет.
@@ -583,7 +627,7 @@ EOF
   local lines_before
   lines_before="$(wc --lines < "$APT_UNATTENDED_UPGRADES_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(count_exact_lines '//Unattended-Upgrade::Automatic-Reboot "false";' "$APT_UNATTENDED_UPGRADES_FILE")" -eq 0 ]
@@ -597,7 +641,7 @@ EOF
   write_apt_conf_param "$APT_AUTO_UPGRADES_FILE" 'APT::Periodic::Unattended-Upgrade "0";'
   write_apt_conf_param "$APT_UNATTENDED_UPGRADES_FILE" 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";'
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   assert_has_line 'APT::Periodic::Unattended-Upgrade "1";' "$APT_AUTO_UPGRADES_FILE"
@@ -607,14 +651,14 @@ EOF
 }
 
 @test "is idempotent for the automatic upgrade files: a second run does not change them" {
-  run "$SCRIPT_UNDER_TEST"
+  run_script
   [ "$status" -eq 0 ]
   local auto_upgrades_after
   local unattended_upgrades_after
   auto_upgrades_after="$(sha256sum "$APT_AUTO_UPGRADES_FILE")"
   unattended_upgrades_after="$(sha256sum "$APT_UNATTENDED_UPGRADES_FILE")"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ "$(sha256sum "$APT_AUTO_UPGRADES_FILE")" = "$auto_upgrades_after" ]
@@ -624,7 +668,7 @@ EOF
 @test "fails with a clear message when the apt configuration directory is missing" {
   rm --recursive --force -- "$APT_CONF_DIR"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$APT_CONF_DIR"* ]]
@@ -652,10 +696,149 @@ EOF
   chmod +x "${stub_dir}/setupcon"
   export PATH="${stub_dir}:${PATH}"
 
-  run "$SCRIPT_UNDER_TEST"
+  run_script
 
   [ "$status" -eq 0 ]
   [ -f "${BATS_TEST_TMPDIR}/setupcon.called" ]
+}
+
+@test "asks for the superuser name and shows the SSH private key QR on a cleared screen" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Configuring the superuser"* ]]
+  # На чистом экране первая строка — подпись User name: с именем, выделенным
+  # жирным, вторая — заголовок, дальше — QR-код приватного ключа
+  # (qrencode -t UTF8 --margin=2).
+  local bold=$'\033[1m'
+  local reset=$'\033[0m'
+  local key_qr
+  key_qr="$(key_qr_code "$SUPERUSER_KEY_FILE")"
+  [[ "$output" == *"${CLEAR_SCREEN}User name: ${bold}${SUPERUSER_NAME}${reset}"$'\n'"SSH private key:"$'\n'"${key_qr}"* ]]
+}
+
+@test "creates the superuser with a home directory and a bash shell" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Creating the user "*"${SUPERUSER_NAME}"* ]]
+  local entry
+  entry="$(getent passwd "$SUPERUSER_NAME")"
+  [ "$(cut --delimiter=: --fields=6 <<< "$entry")" = "$SUPERUSER_HOME" ]
+  [ "$(cut --delimiter=: --fields=7 <<< "$entry")" = "$SUPERUSER_SHELL" ]
+  [ -d "$SUPERUSER_HOME" ]
+}
+
+@test "grants full rights without a password" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Granting full rights without a password in ${SUDOERS_FILE}"* ]]
+  assert_has_line "${SUPERUSER_NAME} ALL=(ALL:ALL) NOPASSWD:ALL" "$SUDOERS_FILE"
+  [ "$(stat --format='%a' "$SUDOERS_FILE")" = '440' ]
+  # Настройка sudo должна быть синтаксически верной.
+  run visudo --check --quiet --file "$SUDOERS_FILE"
+  [ "$status" -eq 0 ]
+  # Полные права без пароля: sudo от имени суперпользователя не спрашивает пароль.
+  run runuser --user "$SUPERUSER_NAME" -- sudo --non-interactive true
+  [ "$status" -eq 0 ]
+}
+
+@test "generates an ed25519 SSH key without a passphrase" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Generating an ed25519 SSH key without a passphrase"* ]]
+  [ -f "$SUPERUSER_KEY_FILE" ]
+  # Ключ ed25519 и без пароля: ssh-keygen -y читает его, не спрашивая пароль.
+  run ssh-keygen -y -f "$SUPERUSER_KEY_FILE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == ssh-ed25519* ]]
+  [ "$(stat --format='%a' "${SUPERUSER_HOME}/.ssh")" = '700' ]
+  [ "$(stat --format='%a' "$SUPERUSER_KEY_FILE")" = '600' ]
+  [ "$(stat --format='%U' "$SUPERUSER_KEY_FILE")" = "$SUPERUSER_NAME" ]
+}
+
+@test "is idempotent: a second run keeps the user and the SSH key" {
+  run_script
+  [ "$status" -eq 0 ]
+  local uid_after_first
+  local key_after_first
+  uid_after_first="$(id --user "$SUPERUSER_NAME")"
+  key_after_first="$(sha256sum "$SUPERUSER_KEY_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already exists"* ]]
+  [[ "$output" == *"already has the SSH key"* ]]
+  [[ "$output" == *"already authorized"* ]]
+  [ "$(id --user "$SUPERUSER_NAME")" = "$uid_after_first" ]
+  [ "$(sha256sum "$SUPERUSER_KEY_FILE")" = "$key_after_first" ]
+  # Публичный ключ добавлен один раз, а не при каждом запуске.
+  [ "$(wc --lines < "$SUPERUSER_AUTHORIZED_KEYS_FILE")" -eq 1 ]
+}
+
+@test "authorizes the key so the superuser can log in" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Authorizing the key in ${SUPERUSER_AUTHORIZED_KEYS_FILE}"* ]]
+  # В authorized_keys попадает именно публичный ключ сгенерированного ключа:
+  # по нему суперпользователь входит, хотя вход по паролю запрещён.
+  assert_has_line "$(< "${SUPERUSER_KEY_FILE}.pub")" "$SUPERUSER_AUTHORIZED_KEYS_FILE"
+  [ "$(stat --format='%a' "$SUPERUSER_AUTHORIZED_KEYS_FILE")" = '600' ]
+  [ "$(stat --format='%U' "$SUPERUSER_AUTHORIZED_KEYS_FILE")" = "$SUPERUSER_NAME" ]
+}
+
+@test "keeps an existing SSH key and shows its QR code" {
+  useradd --create-home --shell "$SUPERUSER_SHELL" "$SUPERUSER_NAME"
+  install --directory --mode 0700 --owner "$SUPERUSER_NAME" --group "$SUPERUSER_NAME" "${SUPERUSER_HOME}/.ssh"
+  ssh-keygen -t ed25519 -N '' -C keep@test -f "$SUPERUSER_KEY_FILE" -q
+  chown "${SUPERUSER_NAME}:${SUPERUSER_NAME}" "$SUPERUSER_KEY_FILE" "${SUPERUSER_KEY_FILE}.pub"
+  local key_before
+  key_before="$(sha256sum "$SUPERUSER_KEY_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already has the SSH key"* ]]
+  [ "$(sha256sum "$SUPERUSER_KEY_FILE")" = "$key_before" ]
+  # Показывается QR-код именно существующего ключа и он же попадает в authorized_keys.
+  [[ "$output" == *"$(key_qr_code "$SUPERUSER_KEY_FILE")"* ]]
+  assert_has_line "$(< "${SUPERUSER_KEY_FILE}.pub")" "$SUPERUSER_AUTHORIZED_KEYS_FILE"
+}
+
+@test "asks again when the user name is invalid" {
+  run "$SCRIPT_UNDER_TEST" <<< $'Bad Name\n'"$SUPERUSER_NAME"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is invalid"* ]]
+  getent passwd "$SUPERUSER_NAME"
+}
+
+@test "fails with a clear message when no user name is entered" {
+  run "$SCRIPT_UNDER_TEST" < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no user name was entered"* ]]
+  # Пользователь не создаётся.
+  run getent passwd "$SUPERUSER_NAME"
+  [ "$status" -ne 0 ]
+}
+
+@test "fails with a clear message when the sudoers directory is missing" {
+  rm --recursive --force -- "$SUDOERS_DIR"
+
+  run_script
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$SUDOERS_DIR"* ]]
+  # Шаг идёт последним, поэтому уже выполненные шаги на месте: Docker включён.
+  assert_has_line 'enable --now docker' "${BATS_TEST_TMPDIR}/systemctl.calls"
+  # Каталог проверяется до создания пользователя.
+  run getent passwd "$SUPERUSER_NAME"
+  [ "$status" -ne 0 ]
 }
 
 @test "passes shellcheck" {
