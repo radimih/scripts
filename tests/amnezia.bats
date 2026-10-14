@@ -2,9 +2,10 @@
 
 # Тесты для amnezia.sh.
 #
-# Запускаются от имени root внутри контейнера Debian 13, в котором установлен
-# пакет console-setup (см. amnezia.Dockerfile и run-tests.sh): скрипт читает
-# /etc/os-release, правит реальный /etc/default/console-setup и вызывает setupcon.
+# Запускаются от имени root внутри контейнера Debian 13, в котором установлены
+# пакеты console-setup и openssh-server (см. amnezia.Dockerfile и run-tests.sh):
+# скрипт читает /etc/os-release, правит реальный /etc/default/console-setup,
+# вызывает setupcon и пишет настройки sshd в /etc/ssh/sshd_config.d.
 #
 # Проверяется:
 #
@@ -19,6 +20,15 @@
 #   не меняя /etc/localtime;
 # - шаг настройки часового пояса идёт до настройки автоматического обновления,
 #   поэтому уже выполнен, когда тот завершается ошибкой;
+# - настройки sshd записываются в файл ${SSHD_CONFIG_FILE}: вход по паролю и вход
+#   пользователем root запрещены, разрешён только вход по ключу;
+# - файл дополнительных настроек перекрывает настройки из других файлов каталога
+#   (например, 50-cloud-init.conf) — это проверяется по эффективной конфигурации
+#   sshd;
+# - повторный запуск файл настроек sshd не меняет (идемпотентность);
+# - настройки применяются перезагрузкой sshd;
+# - при отсутствии каталога /etc/ssh/sshd_config.d скрипт завершается с ошибкой
+#   и внятным сообщением, не трогая настройки консоли;
 # - параметры CODESET, FONTFACE и FONTSIZE получают нужные значения;
 # - закомментированные параметры заменяются на месте, без дубликатов;
 # - отсутствующие параметры добавляются в конец файла;
@@ -53,6 +63,8 @@ APT_AUTO_UPGRADES_FILE="${APT_CONF_DIR}/20auto-upgrades"
 APT_UNATTENDED_UPGRADES_FILE="${APT_CONF_DIR}/50unattended-upgrades"
 CONSOLE_SETUP_FILE="/etc/default/console-setup"
 OS_RELEASE_FILE="/etc/os-release"
+SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
+SSHD_CONFIG_FILE="${SSHD_CONFIG_DIR}/00-hardening.conf"
 SYSCTL_DIR="/etc/sysctl.d"
 SYSCTL_FILE="${SYSCTL_DIR}/9999-router.conf"
 TIME_ZONE="Asia/Novosibirsk"
@@ -83,15 +95,19 @@ setup() {
   cp -- "$TIME_ZONE_INFO_PRISTINE" "$TIME_ZONE_INFO_FILE"
   mkdir --parents "$SYSCTL_DIR"
   rm --force -- "$SYSCTL_FILE"
+  # Каталог с настройками sshd: скрипт только добавляет в него свой файл,
+  # поэтому достаточно очистить каталог от файлов, созданных тестами.
+  mkdir --parents "$SSHD_CONFIG_DIR"
+  rm --force -- "${SSHD_CONFIG_DIR}"/*.conf
 
-  # apt-get и sysctl не выполняются по-настоящему: тесты проверяют не установку
-  # пакетов и не применение параметров ядра, а то, как скрипт их запускает.
+  # apt-get, sysctl и systemctl не выполняются по-настоящему: тесты проверяют не
+  # установку пакетов и не применение настроек, а то, как скрипт их запускает.
   # Заглушки записывают вызовы в файлы, чтобы тест мог проверить их состав
   # и порядок.
   local stub_dir="${BATS_TEST_TMPDIR}/bin"
   local name
   mkdir --parents "$stub_dir"
-  for name in apt-get sysctl; do
+  for name in apt-get sysctl systemctl; do
     cat > "${stub_dir}/${name}" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/${name}.calls"
@@ -314,6 +330,67 @@ dockerfile_apt_packages() {
   assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
 }
 
+@test "writes the SSH settings into a drop-in file and they take effect" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Updating ${SSHD_CONFIG_FILE}"* ]]
+  assert_has_line 'PasswordAuthentication no' "$SSHD_CONFIG_FILE"
+  assert_has_line 'PermitRootLogin no' "$SSHD_CONFIG_FILE"
+  # sshd использует первое полученное значение, а каталог ${SSHD_CONFIG_DIR}
+  # подключается в начале sshd_config, поэтому наши значения действуют:
+  # проверяем эффективную конфигурацию (sshd -T).
+  local effective
+  effective="$(sshd -T)"
+  [[ "$effective" == *$'\npermitrootlogin no'* ]]
+  [[ "$effective" == *$'\npasswordauthentication no'* ]]
+}
+
+@test "the SSH settings override other files in the configuration directory" {
+  # 50-cloud-init.conf встречается в облачных образах Debian и включает вход по
+  # паролю; наш файл должен перекрывать его.
+  printf 'PasswordAuthentication yes\nPermitRootLogin prohibit-password\n' \
+      > "${SSHD_CONFIG_DIR}/50-cloud-init.conf"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  local effective
+  effective="$(sshd -T)"
+  [[ "$effective" == *$'\npermitrootlogin no'* ]]
+  [[ "$effective" == *$'\npasswordauthentication no'* ]]
+}
+
+@test "is idempotent for the SSH settings: a second run does not change the file" {
+  run "$SCRIPT_UNDER_TEST"
+  [ "$status" -eq 0 ]
+  local after_first
+  after_first="$(sha256sum "$SSHD_CONFIG_FILE")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$SSHD_CONFIG_FILE")" = "$after_first" ]
+}
+
+@test "applies the SSH settings by reloading sshd" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/systemctl.calls")" = "reload ssh" ]
+}
+
+@test "fails with a clear message when the sshd configuration directory is missing" {
+  rm --recursive --force -- "$SSHD_CONFIG_DIR"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$SSHD_CONFIG_DIR"* ]]
+  # Шаг идёт раньше настройки консоли, поэтому она не выполняется.
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+}
+
 @test "updates the package database and installs the packages in alphabetical order" {
   run "$SCRIPT_UNDER_TEST"
 
@@ -321,7 +398,7 @@ dockerfile_apt_packages() {
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl openssh-server ufw unattended-upgrades' ]
 }
 
 @test "writes the kernel parameters for the router role" {

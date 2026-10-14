@@ -10,6 +10,7 @@ APT_CONF_DIR=/etc/apt/apt.conf.d
 APT_PACKAGES=(
   console-setup
   curl
+  openssh-server
   ufw
   unattended-upgrades
 )
@@ -58,6 +59,22 @@ declare -A CONSOLE_SETUP_PARAMS=(
 
 OS_RELEASE_FILE=/etc/os-release
 
+# Каталог с дополнительными настройками sshd
+SSHD_CONFIG_DIR=/etc/ssh/sshd_config.d
+
+# Файл дополнительных настроек sshd: sshd использует первое полученное значение,
+# а каталог ${SSHD_CONFIG_DIR} подключается в начале sshd_config, поэтому имя
+# файла начинается с 00 — так наши значения перекрывают настройки из других
+# файлов каталога (например, 50-cloud-init.conf)
+SSHD_CONFIG_FILE=${SSHD_CONFIG_DIR}/00-hardening.conf
+
+# Параметры sshd в форме <параметр>=<значение>, в алфавитном порядке: вход по
+# паролю и вход пользователем root запрещены, разрешён только вход по ключу
+SSHD_CONFIG_PARAMS=(
+  PasswordAuthentication=no
+  PermitRootLogin=no
+)
+
 SYSCTL_DIR=/etc/sysctl.d
 SYSCTL_FILE=${SYSCTL_DIR}/9999-router.conf
 
@@ -86,6 +103,7 @@ main() {
   check_debian
   configure_time_zone
   install_apt_packages
+  configure_ssh
   configure_automatic_upgrades
   configure_router_sysctl
   configure_linux_console
@@ -134,6 +152,27 @@ install_apt_packages() {
   apt-get update
 
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
+}
+
+configure_ssh() {
+
+  local key
+  local param
+
+  print_step_msg "Configuring SSH access"
+
+  if [[ ! -d "${SSHD_CONFIG_DIR}" ]]; then
+    print_error_msg "... the directory ${SSHD_CONFIG_DIR} does not exist, install the openssh-server package first"
+    return 1
+  fi
+
+  print_info_msg "Updating ${SSHD_CONFIG_FILE}"
+  for param in "${SSHD_CONFIG_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_sshd_config_param "${SSHD_CONFIG_FILE}" "${key}" "${key} ${param#*=}"
+  done
+
+  systemctl reload ssh
 }
 
 configure_automatic_upgrades() {
@@ -231,6 +270,12 @@ set_config_param() {
 set_apt_conf_param() {
 
   set_config_line "$1" "^[[:space:]]*(//)?[[:space:]]*$2[[:space:]]+" "$3"
+}
+
+# Задаёт параметр вида <параметр> <значение> (файл sshd_config)
+set_sshd_config_param() {
+
+  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]+" "$3"
 }
 
 print_error_msg() {

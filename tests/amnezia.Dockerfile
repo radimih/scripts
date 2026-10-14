@@ -9,6 +9,7 @@ RUN apt-get update \
  && apt-get install --yes --no-install-recommends \
       console-setup \
       curl \
+      openssh-server \
       ufw \
       unattended-upgrades \
  && rm -rf /var/lib/apt/lists/*
