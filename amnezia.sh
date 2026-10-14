@@ -98,6 +98,9 @@ TIME_ZONE_DIR=/usr/share/zoneinfo
 # Символическая ссылка, задающая часовой пояс системы
 TIME_ZONE_FILE=/etc/localtime
 
+# Каталог с настройками брандмауэра ufw
+UFW_DIR=/etc/ufw
+
 main() {
 
   check_debian
@@ -105,6 +108,7 @@ main() {
   configure_linux_console
   configure_time_zone
   configure_ssh
+  configure_firewall
   configure_automatic_upgrades
   configure_router_sysctl
 }
@@ -173,6 +177,26 @@ configure_ssh() {
   done
 
   systemctl reload ssh
+}
+
+configure_firewall() {
+
+  print_step_msg "Configuring the firewall"
+
+  if [[ ! -d "${UFW_DIR}" ]]; then
+    print_error_msg "... the directory ${UFW_DIR} does not exist, install the ufw package first"
+    return 1
+  fi
+
+  # Перенаправляемые (routed) соединения — транзитный трафик клиентов VPN.
+  print_info_msg "Denying incoming connections except ssh and allowing outgoing and routed connections"
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw default allow routed
+  ufw allow ssh
+
+  print_info_msg "Enabling the firewall"
+  ufw --force enable
 }
 
 configure_automatic_upgrades() {

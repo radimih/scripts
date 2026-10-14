@@ -29,6 +29,13 @@
 # - настройки применяются перезагрузкой sshd;
 # - при отсутствии каталога /etc/ssh/sshd_config.d скрипт завершается с ошибкой
 #   и внятным сообщением;
+# - брандмауэр настраивается командами ufw: входящие соединения запрещены по
+#   умолчанию, разрешён только ssh, исходящие разрешены; перенаправляемые
+#   (транзитные, например трафик клиентов VPN) разрешены; ssh разрешается до
+#   включения брандмауэра, а включение идёт без вопроса (--force);
+# - повторный запуск применяет те же правила;
+# - при отсутствии каталога /etc/ufw скрипт завершается с ошибкой и внятным
+#   сообщением, не настраивая брандмауэр (шаг идёт после настройки SSH);
 # - параметры CODESET, FONTFACE и FONTSIZE получают нужные значения;
 # - закомментированные параметры заменяются на месте, без дубликатов;
 # - отсутствующие параметры добавляются в конец файла;
@@ -71,6 +78,7 @@ TIME_ZONE="Asia/Novosibirsk"
 TIME_ZONE_DIR="/usr/share/zoneinfo"
 TIME_ZONE_FILE="/etc/localtime"
 TIME_ZONE_INFO_FILE="${TIME_ZONE_DIR}/${TIME_ZONE}"
+UFW_DIR="/etc/ufw"
 # Эталонные копии файлов в том виде, в каком их ставит базовый образ и пакеты
 # console-setup и unattended-upgrades: setup() восстанавливает из них исходное
 # состояние перед каждым сценарием. Сюда же — /etc/localtime и файл зоны
@@ -99,15 +107,18 @@ setup() {
   # поэтому достаточно очистить каталог от файлов, созданных тестами.
   mkdir --parents "$SSHD_CONFIG_DIR"
   rm --force -- "${SSHD_CONFIG_DIR}"/*.conf
+  # Каталог с настройками ufw: скрипт только проверяет его наличие и вызывает
+  # команду ufw (заглушённую), поэтому достаточно восстановить каталог.
+  mkdir --parents "$UFW_DIR"
 
-  # apt-get, sysctl и systemctl не выполняются по-настоящему: тесты проверяют не
-  # установку пакетов и не применение настроек, а то, как скрипт их запускает.
-  # Заглушки записывают вызовы в файлы, чтобы тест мог проверить их состав
-  # и порядок.
+  # apt-get, sysctl, systemctl и ufw не выполняются по-настоящему: тесты
+  # проверяют не установку пакетов и не применение настроек, а то, как скрипт их
+  # запускает. Заглушки записывают вызовы в файлы, чтобы тест мог проверить их
+  # состав и порядок.
   local stub_dir="${BATS_TEST_TMPDIR}/bin"
   local name
   mkdir --parents "$stub_dir"
-  for name in apt-get sysctl systemctl; do
+  for name in apt-get sysctl systemctl ufw; do
     cat > "${stub_dir}/${name}" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/${name}.calls"
@@ -389,6 +400,55 @@ dockerfile_apt_packages() {
   [[ "$output" == *"$SSHD_CONFIG_DIR"* ]]
   # Шаг идёт после настройки консоли, поэтому она уже выполнена.
   assert_has_line 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE"
+}
+
+@test "leaves only ssh open for incoming connections and allows all outgoing ones" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Denying incoming connections except ssh and allowing outgoing and routed connections"* ]]
+  [[ "$output" == *"Enabling the firewall"* ]]
+  # Входящие соединения запрещены по умолчанию, разрешён только ssh; исходящие и
+  # перенаправляемые разрешены. ssh разрешается до включения брандмауэра, поэтому
+  # доступ не теряется, а включение идёт без вопроса (--force).
+  [ "$(cat "${BATS_TEST_TMPDIR}/ufw.calls")" \
+      = $'default deny incoming\ndefault allow outgoing\ndefault allow routed\nallow ssh\n--force enable' ]
+}
+
+@test "forwards traffic of vpn clients" {
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Транзитный трафик клиентов VPN должен проходить: политика по умолчанию для
+  # перенаправляемых соединений — allow.
+  assert_has_line 'default allow routed' "${BATS_TEST_TMPDIR}/ufw.calls"
+}
+
+@test "applies the firewall rules again on a second run without changing them" {
+  run "$SCRIPT_UNDER_TEST"
+  [ "$status" -eq 0 ]
+  local first_run
+  first_run="$(cat "${BATS_TEST_TMPDIR}/ufw.calls")"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -eq 0 ]
+  # Скрипт каждый раз задаёт одни и те же правила, поэтому повторный запуск
+  # безопасен: ssh остаётся разрешён.
+  [ "$(cat "${BATS_TEST_TMPDIR}/ufw.calls")" = "${first_run}"$'\n'"${first_run}" ]
+}
+
+@test "fails with a clear message when the ufw configuration directory is missing" {
+  rm --recursive --force -- "$UFW_DIR"
+
+  run "$SCRIPT_UNDER_TEST"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$UFW_DIR"* ]]
+  # Шаг идёт после настройки SSH, поэтому она уже выполнена.
+  assert_has_line 'PasswordAuthentication no' "$SSHD_CONFIG_FILE"
+  # Каталог проверяется до вызовов ufw, поэтому брандмауэр не настраивается.
+  [ ! -f "${BATS_TEST_TMPDIR}/ufw.calls" ]
 }
 
 @test "updates the package database and installs the packages in alphabetical order" {
