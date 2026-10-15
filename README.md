@@ -31,6 +31,8 @@
 bash <(wget -qO- https://raw.githubusercontent.com/radimih/scripts/main/amnezia.sh)
 ```
 
+Скрипт в процессе работы запросит имя создаваемого суперпользователя.
+
 ## Тесты
 
 Скрипты проверяются в контейнере Debian 13, подробности — в
