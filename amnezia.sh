@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-# Скрипт предполагает запуск от имени пользователя root
-
 APT_CONF_DIR=/etc/apt/apt.conf.d
 
 # Устанавливаемые apt-пакеты в алфавитном порядке
@@ -126,6 +124,7 @@ UFW_DIR=/etc/ufw
 main() {
 
   check_debian
+  check_root
   install_apt_packages
   configure_linux_console
   configure_time_zone
@@ -162,6 +161,16 @@ check_debian() {
 
   if [[ -n "${os_version}" && "${os_version%%.*}" -lt "${DEBIAN_MIN_VERSION}" ]]; then
     print_error_msg "... the script requires Debian ${CL_BOLD}${DEBIAN_MIN_VERSION}${CL_NO} or newer, the current version is ${os_version}"
+    return 1
+  fi
+}
+
+check_root() {
+
+  print_step_msg "Checking root privileges"
+
+  if (( EUID != 0 )); then
+    print_error_msg "... the script must be run as root, the current user is $(id --user --name)"
     return 1
   fi
 }

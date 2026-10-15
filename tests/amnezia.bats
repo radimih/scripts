@@ -14,6 +14,7 @@
 # - то же самое, если ID системы не определён или нет /etc/os-release;
 # - то же самое, если версия Debian ниже минимальной поддерживаемой (13); в
 #   Debian testing и sid поля VERSION_ID нет, поэтому там версия не проверяется;
+# - то же самое, если скрипт запущен не от имени root;
 # - часовой пояс задаётся символической ссылкой /etc/localtime на файл зоны
 #   /usr/share/zoneinfo/Asia/Novosibirsk, а в сообщении шага значение часового
 #   пояса выделено жирным;
@@ -387,6 +388,18 @@ dockerfile_apt_packages() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot detect the operating system"* ]]
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+}
+
+@test "fails when the script is not run as root" {
+  run setpriv --reuid nobody --regid nogroup --clear-groups \
+    "$SCRIPT_UNDER_TEST" <<< "$SUPERUSER_NAME"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"must be run as root, the current user is nobody"* ]]
+  # Настройка консоли не выполняется: проверка прав идёт сразу после проверки ОС.
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+  # Часовой пояс тоже не меняется.
+  assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
 }
 
 @test "sets the time zone to Asia/Novosibirsk" {
