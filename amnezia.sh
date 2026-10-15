@@ -11,8 +11,10 @@ APT_PACKAGES=(
   docker-cli
   docker-compose
   docker.io
+  iproute2
   openssh-client
   openssh-server
+  procps
   qrencode
   sudo
   ufw
@@ -64,6 +66,22 @@ declare -A CONSOLE_SETUP_PARAMS=(
 
 # Минимальная поддерживаемая версия Debian
 DEBIAN_MIN_VERSION=13
+
+# Каталог со скриптами, которые pam_motd выполняет при каждом входе
+MOTD_DIR=/etc/update-motd.d
+
+# Скрипт формирования сообщения дня: показывает основные характеристики хоста,
+# текущее потребление ресурсов и время работы
+MOTD_FILE=${MOTD_DIR}/00-motd
+
+# Скрипт пакета base-files, выводящий uname: дублирует сведения о ядре, поэтому
+# удаляется
+MOTD_UNAME_FILE=${MOTD_DIR}/10-uname
+
+# Статическое сообщение дня: Debian показывает его вместе с динамическим,
+# поэтому файл очищается — иначе вместо краткой сводки выводится стандартный
+# текст base-files
+MOTD_STATIC_FILE=/etc/motd
 
 OS_RELEASE_FILE=/etc/os-release
 
@@ -128,6 +146,7 @@ main() {
   install_apt_packages
   configure_linux_console
   configure_time_zone
+  configure_motd
   configure_automatic_upgrades
   configure_router_sysctl
   configure_ssh
@@ -190,6 +209,25 @@ configure_time_zone() {
 
   print_info_msg "Setting the time zone to ${CL_BOLD}${TIME_ZONE}${CL_NO} in ${TIME_ZONE_FILE}"
   ln --symbolic --force --no-dereference "${zone_info}" "${TIME_ZONE_FILE}"
+}
+
+configure_motd() {
+
+  print_step_msg "Configuring the message of the day"
+
+  if [[ ! -d "${MOTD_DIR}" ]]; then
+    print_error_msg "... the directory ${MOTD_DIR} does not exist, install the base-files package first"
+    return 1
+  fi
+
+  print_info_msg "Removing ${MOTD_UNAME_FILE} that duplicates the kernel information"
+  rm --force -- "${MOTD_UNAME_FILE}"
+
+  print_info_msg "Updating ${MOTD_FILE}"
+  write_motd_script "${MOTD_FILE}"
+
+  print_info_msg "Clearing ${MOTD_STATIC_FILE} to show only the summary"
+  : > "${MOTD_STATIC_FILE}"
 }
 
 install_apt_packages() {
@@ -489,6 +527,97 @@ set_apt_conf_param() {
 set_sshd_config_param() {
 
   set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]+" "$3"
+}
+
+# Записывает в файл <файл> скрипт формирования сообщения дня
+write_motd_script() {
+
+  local file="$1"
+
+  cat > "${file}" <<'MOTD'
+#!/usr/bin/env bash
+
+# Сообщение дня: основные характеристики хоста, текущее потребление ресурсов и
+# время работы. Скрипт выполняет pam_motd при каждом входе, поэтому значения в
+# нём всегда свежие. Используются утилиты ip, free, uptime и df.
+
+# Разбор вывода утилит опирается на англоязычные подписи
+export LC_ALL=C
+
+# Подписи полей выделяются жирным
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+# Название операционной системы
+os_name() {
+  sed --quiet --regexp-extended 's/^PRETTY_NAME="(.*)"$/\1/p' /etc/os-release
+}
+
+# Основной IP-адрес: адрес, через который хост выходит в сеть
+ip_address() {
+  ip route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1) }'
+}
+
+# Время работы
+uptime_text() {
+  uptime --pretty | sed --regexp-extended 's/^up //'
+}
+
+# Средняя загрузка за 1, 5 и 15 минут
+load_text() {
+  uptime | sed --regexp-extended 's/.*load average: //'
+}
+
+# Потребление памяти: <использовано> из <всего> и доля в процентах
+memory_usage() {
+  free --kibi | awk '/^Mem:/ { printf "%.1f GiB / %.1f GiB (%d%%)", $3 / 1048576, $2 / 1048576, $3 * 100 / $2 }'
+}
+
+# Потребление диска: <использовано> из <всего> и доля в процентах
+disk_usage() {
+  df --portability / | awk 'NR == 2 { printf "%.1f GiB / %.1f GiB (%s)", $3 / 1048576, $2 / 1048576, $5 }'
+}
+
+# Наибольшая длина среди аргументов
+max_length() {
+  local length=0
+  local value
+
+  for value in "$@"; do
+    if (( ${#value} > length )); then
+      length=${#value}
+    fi
+  done
+
+  printf '%d' "${length}"
+}
+
+# Строка таблицы: <подпись> и <значение> левого столбца, затем правого
+row() {
+  printf '%s%-*s%s  %-*s  %s%-*s%s  %s\n' \
+    "${BOLD}" "${LABEL_WIDTH}" "$1" "${RESET}" "${VALUE_WIDTH}" "$2" \
+    "${BOLD}" "${LABEL_WIDTH}" "$3" "${RESET}" "$4"
+}
+
+left_labels=(OS Kernel Host IP)
+left_values=("$(os_name)" "$(uname --kernel-release)" "$(hostname)" "$(ip_address)")
+
+right_labels=(Uptime Load Memory Disk)
+right_values=(
+  "$(uptime_text)"
+  "$(load_text) ($(nproc) cores)"
+  "$(memory_usage)"
+  "$(disk_usage)"
+)
+
+LABEL_WIDTH="$(max_length "${left_labels[@]}" "${right_labels[@]}")"
+VALUE_WIDTH="$(max_length "${left_values[@]}")"
+
+for (( index = 0; index < ${#left_labels[@]}; index++ )); do
+  row "${left_labels[index]}" "${left_values[index]}" "${right_labels[index]}" "${right_values[index]}"
+done
+MOTD
+  chmod 0755 "${file}"
 }
 
 print_error_msg() {

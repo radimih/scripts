@@ -12,8 +12,10 @@ RUN apt-get update \
       docker-cli \
       docker-compose \
       docker.io \
+      iproute2 \
       openssh-client \
       openssh-server \
+      procps \
       qrencode \
       sudo \
       ufw \
@@ -25,12 +27,15 @@ RUN apt-get update \
 # образ), /etc/localtime и файла зоны /usr/share/zoneinfo/Asia/Novosibirsk, а
 # также файлов /etc/apt/apt.conf.d/20auto-upgrades и
 # /etc/apt/apt.conf.d/50unattended-upgrades (в том виде, в каком их ставит
-# пакет unattended-upgrades): тесты восстанавливают из них исходное состояние
-# перед каждым сценарием.
+# пакет unattended-upgrades) и файлов /etc/motd и
+# /etc/update-motd.d/10-uname (в том виде, в каком их ставит пакет base-files):
+# тесты восстанавливают из них исходное состояние перед каждым сценарием.
 RUN mkdir --parents /usr/share/amnezia-test \
  && cp /etc/default/console-setup /usr/share/amnezia-test/console-setup.pristine \
  && cp /etc/os-release /usr/share/amnezia-test/os-release.pristine \
  && cp --no-dereference /etc/localtime /usr/share/amnezia-test/localtime.pristine \
  && cp /usr/share/zoneinfo/Asia/Novosibirsk /usr/share/amnezia-test/novosibirsk.pristine \
  && cp /etc/apt/apt.conf.d/20auto-upgrades /usr/share/amnezia-test/20auto-upgrades.pristine \
- && cp /etc/apt/apt.conf.d/50unattended-upgrades /usr/share/amnezia-test/50unattended-upgrades.pristine
+ && cp /etc/apt/apt.conf.d/50unattended-upgrades /usr/share/amnezia-test/50unattended-upgrades.pristine \
+ && cp /etc/motd /usr/share/amnezia-test/motd.pristine \
+ && cp /etc/update-motd.d/10-uname /usr/share/amnezia-test/10-uname.pristine

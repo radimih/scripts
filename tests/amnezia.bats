@@ -23,6 +23,19 @@
 #   не меняя /etc/localtime;
 # - шаг настройки часового пояса идёт до настройки автоматического обновления,
 #   поэтому уже выполнен, когда тот завершается ошибкой;
+# - сообщение дня собирается скриптом /etc/update-motd.d/00-motd: его выполняет
+#   pam_motd при каждом входе, поэтому значения всегда свежие. Скрипт выводит две
+#   колонки — слева характеристики хоста (система, ядро, имя хоста, основной
+#   IP-адрес), справа потребление ресурсов и время работы (нагрузка, память,
+#   диск) — с подписями, выделенными жирным (без цвета); скрипт использует
+#   утилиты ip, free, uptime и df из пакетов iproute2 и procps;
+# - статическое /etc/motd очищается, а скрипт base-files
+#   /etc/update-motd.d/10-uname удаляется: иначе вместе с краткой сводкой
+#   выводится стандартный текст и строка uname;
+# - повторный запуск не меняет ни скрипт, ни /etc/motd (идемпотентность);
+# - при отсутствии каталога /etc/update-motd.d скрипт завершается с ошибкой и
+#   внятным сообщением (шаг идёт после настройки часового пояса);
+# - скрипт сообщения дня проходит shellcheck;
 # - настройки sshd записываются в файл ${SSHD_CONFIG_FILE}: вход по паролю и вход
 #   пользователем root запрещены, разрешён только вход по ключу;
 # - файл дополнительных настроек перекрывает настройки из других файлов каталога
@@ -91,6 +104,10 @@ APT_CONF_DIR="/etc/apt/apt.conf.d"
 APT_AUTO_UPGRADES_FILE="${APT_CONF_DIR}/20auto-upgrades"
 APT_UNATTENDED_UPGRADES_FILE="${APT_CONF_DIR}/50unattended-upgrades"
 CONSOLE_SETUP_FILE="/etc/default/console-setup"
+MOTD_DIR="/etc/update-motd.d"
+MOTD_FILE="${MOTD_DIR}/00-motd"
+MOTD_STATIC_FILE="/etc/motd"
+MOTD_UNAME_FILE="${MOTD_DIR}/10-uname"
 OS_RELEASE_FILE="/etc/os-release"
 SSHD_CONFIG_DIR="/etc/ssh/sshd_config.d"
 SSHD_CONFIG_FILE="${SSHD_CONFIG_DIR}/00-hardening.conf"
@@ -121,6 +138,8 @@ OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
 TIME_ZONE_FILE_PRISTINE="/usr/share/amnezia-test/localtime.pristine"
 TIME_ZONE_INFO_PRISTINE="/usr/share/amnezia-test/novosibirsk.pristine"
 APT_UNATTENDED_UPGRADES_PRISTINE="/usr/share/amnezia-test/50unattended-upgrades.pristine"
+MOTD_STATIC_FILE_PRISTINE="/usr/share/amnezia-test/motd.pristine"
+MOTD_UNAME_FILE_PRISTINE="/usr/share/amnezia-test/10-uname.pristine"
 
 setup() {
   mkdir --parents "$APT_CONF_DIR"
@@ -132,6 +151,13 @@ setup() {
   # неё в файл зоны: нужны --remove-destination и --no-dereference.
   cp --remove-destination --no-dereference "$TIME_ZONE_FILE_PRISTINE" "$TIME_ZONE_FILE"
   cp -- "$TIME_ZONE_INFO_PRISTINE" "$TIME_ZONE_INFO_FILE"
+  # Сообщение дня: скрипт очищает /etc/motd и удаляет 10-uname, поэтому
+  # возвращаем исходное состояние и убираем скрипт, созданный предыдущим
+  # сценарием.
+  mkdir --parents "$MOTD_DIR"
+  rm --force -- "$MOTD_FILE"
+  cp -- "$MOTD_STATIC_FILE_PRISTINE" "$MOTD_STATIC_FILE"
+  cp -- "$MOTD_UNAME_FILE_PRISTINE" "$MOTD_UNAME_FILE"
   mkdir --parents "$SYSCTL_DIR"
   rm --force -- "$SYSCTL_FILE"
   # Каталог с настройками sshd: скрипт только добавляет в него свой файл,
@@ -436,6 +462,102 @@ dockerfile_apt_packages() {
   assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
 }
 
+@test "configures the message of the day" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Configuring the message of the day"* ]]
+  [[ "$output" == *"Updating ${MOTD_FILE}"* ]]
+  # Скрипт кладётся в каталог, который pam_motd выполняет при каждом входе, и
+  # run-parts его отбирает; сводку формирует он, а не стандартные скрипты пакетов.
+  [ -x "$MOTD_FILE" ]
+  [[ "$(run-parts --list "$MOTD_DIR")" == *"$MOTD_FILE"* ]]
+  # Стандартный текст base-files не выводится: статическое сообщение очищено, а
+  # скрипт с uname удалён.
+  [ ! -s "$MOTD_STATIC_FILE" ]
+  [ ! -e "$MOTD_UNAME_FILE" ]
+}
+
+@test "shows the host, the resource usage and the uptime in two columns" {
+  run_script
+  [ "$status" -eq 0 ]
+
+  run "$MOTD_FILE"
+
+  [ "$status" -eq 0 ]
+  local os_name
+  local host_name
+  local kernel
+  os_name="$(sed --quiet --regexp-extended 's/^PRETTY_NAME="(.*)"$/\1/p' "$OS_RELEASE_FILE")"
+  host_name="$(hostname)"
+  kernel="$(uname --kernel-release)"
+  # Подписи выделены жирным, цвета нет: цветовые коды содержат «;», например 1;36.
+  [[ "$output" == *$'\033[1m'* ]]
+  [[ "$output" == *$'\033[0m'* ]]
+  [[ "$output" != *';'* ]]
+  # Убираем выделение, чтобы проверять текст таблицы.
+  local escape=$'\033'
+  local plain
+  plain="$(sed --regexp-extended "s/${escape}\[[0-9;]*m//g" <<< "$output")"
+  # Две колонки по четыре строки: слева характеристики хоста, справа —
+  # потребление ресурсов и время работы. Архитектуры процессора в выводе нет.
+  [ "$(wc --lines <<< "$plain")" -eq 4 ]
+  [[ "$(sed --quiet 1p <<< "$plain")" == "OS"*"${os_name}"*"Uptime"* ]]
+  [[ "$(sed --quiet 2p <<< "$plain")" == "Kernel"*"${kernel}"*"Load"* ]]
+  [[ "$(sed --quiet 3p <<< "$plain")" == "Host"*"${host_name}"*"Memory"* ]]
+  [[ "$(sed --quiet 4p <<< "$plain")" == "IP"*"Disk"* ]]
+  [[ "$plain" != *"Arch"* ]]
+  # Строка IP содержит основной адрес хоста.
+  [[ "$(sed --quiet 4p <<< "$plain")" =~ ^IP\ +[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]
+  # Правый столбец начинается в одной и той же колонке на всех строках.
+  local right_columns
+  right_columns="$(awk '{ match($0, /(Uptime|Load|Memory|Disk)/); print RSTART }' <<< "$plain" | sort --unique)"
+  [ "$(wc --lines <<< "$right_columns")" -eq 1 ]
+  # Текущее потребление ресурсов и время работы.
+  [[ "$plain" == *"$(nproc) cores)"* ]]
+  [[ "$plain" == *" GiB / "* ]]
+  [[ "$plain" == *"%)"* ]]
+  # Время работы выводится человекочитаемо: единицы измерения, а не секунды.
+  [[ "$(sed --quiet 1p <<< "$plain")" =~ Uptime\ +[0-9] ]]
+}
+
+@test "is idempotent for the message of the day: a second run does not change it" {
+  run_script
+  [ "$status" -eq 0 ]
+  local script_after_first
+  local static_after_first
+  script_after_first="$(sha256sum "$MOTD_FILE")"
+  static_after_first="$(sha256sum "$MOTD_STATIC_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$MOTD_FILE")" = "$script_after_first" ]
+  [ "$(sha256sum "$MOTD_STATIC_FILE")" = "$static_after_first" ]
+  [ ! -e "$MOTD_UNAME_FILE" ]
+}
+
+@test "the message of the day script passes shellcheck" {
+  run_script
+  [ "$status" -eq 0 ]
+
+  run shellcheck "$MOTD_FILE"
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "fails with a clear message when the message of the day directory is missing" {
+  rm --recursive --force -- "$MOTD_DIR"
+
+  run_script
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$MOTD_DIR"* ]]
+  # Шаг идёт после настройки часового пояса, поэтому она уже выполнена.
+  assert_symlink_target "$TIME_ZONE_FILE" "$TIME_ZONE_INFO_FILE"
+}
+
 @test "writes the SSH settings into a drop-in file and they take effect" {
   run_script
 
@@ -557,7 +679,7 @@ dockerfile_apt_packages() {
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io openssh-client openssh-server qrencode sudo ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io iproute2 openssh-client openssh-server procps qrencode sudo ufw unattended-upgrades' ]
 }
 
 @test "enables and starts the Docker service as the last step" {
