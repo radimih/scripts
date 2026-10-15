@@ -86,6 +86,8 @@
 #   скрипт завершается с ошибкой;
 # - пользователь создаётся с домашним каталогом и оболочкой bash, если его ещё
 #   нет, и не пересоздаётся, если он есть;
+# - пользователь добавляется в группу администраторов sudo: членство в группе
+#   проверяют программы, которые в sudoers не смотрят;
 # - суперпользователю выдаются полные права без пароля (файл
 #   /etc/sudoers.d/00-superuser), что проверяется запуском sudo без пароля;
 # - если у суперпользователя нет SSH-ключа, генерируется ключ ed25519 без пароля
@@ -121,6 +123,7 @@ UFW_DIR="/etc/ufw"
 SUDOERS_DIR="/etc/sudoers.d"
 SUDOERS_FILE="${SUDOERS_DIR}/00-superuser"
 SUPERUSER_NAME="vpnuser"
+SUPERUSER_GROUP="sudo"
 SUPERUSER_SHELL="/bin/bash"
 SUPERUSER_HOME="/home/${SUPERUSER_NAME}"
 SUPERUSER_KEY_FILE="${SUPERUSER_HOME}/.ssh/id_ed25519"
@@ -897,6 +900,18 @@ EOF
   [ "$(cut --delimiter=: --fields=6 <<< "$entry")" = "$SUPERUSER_HOME" ]
   [ "$(cut --delimiter=: --fields=7 <<< "$entry")" = "$SUPERUSER_SHELL" ]
   [ -d "$SUPERUSER_HOME" ]
+}
+
+@test "adds the superuser to the sudo group" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Adding the user "*"${SUPERUSER_NAME}"*"${SUPERUSER_GROUP}"* ]]
+  # Членство в группе администраторов проверяют программы, которые в sudoers не
+  # смотрят: они выполняют groups <имя> и ищут в списке групп sudo.
+  local group_names
+  group_names="$(id --groups --name "$SUPERUSER_NAME")"
+  [[ " ${group_names} " == *" ${SUPERUSER_GROUP} "* ]]
 }
 
 @test "grants full rights without a password" {

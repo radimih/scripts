@@ -107,6 +107,10 @@ SUDOERS_DIR=/etc/sudoers.d
 # Файл дополнительных настроек sudo: полные права без пароля для суперпользователя
 SUDOERS_FILE=${SUDOERS_DIR}/00-superuser
 
+# Группа суперпользователя: полные права без пароля выдаёт файл sudoers, но
+# сторонние программы проверяют членство в группе администраторов
+SUPERUSER_GROUP=sudo
+
 # Оболочка суперпользователя
 SUPERUSER_SHELL=/bin/bash
 
@@ -374,6 +378,9 @@ configure_superuser() {
     print_info_msg "Creating the user ${CL_BOLD}${SUPERUSER_NAME}${CL_NO}"
     useradd --create-home --shell "${SUPERUSER_SHELL}" "${SUPERUSER_NAME}"
   fi
+
+  print_info_msg "Adding the user ${CL_BOLD}${SUPERUSER_NAME}${CL_NO} to the group ${SUPERUSER_GROUP}"
+  usermod --append --groups "${SUPERUSER_GROUP}" "${SUPERUSER_NAME}"
 
   print_info_msg "Granting full rights without a password in ${SUDOERS_FILE}"
   printf '%s ALL=(ALL:ALL) NOPASSWD:ALL\n' "${SUPERUSER_NAME}" > "${SUDOERS_FILE}"
