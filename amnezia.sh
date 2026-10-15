@@ -64,6 +64,9 @@ declare -A CONSOLE_SETUP_PARAMS=(
   [FONTSIZE]=8x16
 )
 
+# Минимальная поддерживаемая версия Debian
+DEBIAN_MIN_VERSION=13
+
 OS_RELEASE_FILE=/etc/os-release
 
 # Каталог с дополнительными настройками sshd
@@ -137,6 +140,7 @@ main() {
 check_debian() {
 
   local os_id
+  local os_version
 
   print_step_msg "Checking the operating system"
 
@@ -145,10 +149,19 @@ check_debian() {
     return 1
   fi
 
-  os_id="$(sed --quiet --regexp-extended 's/^ID="?([^"]*)"?$/\1/p' "${OS_RELEASE_FILE}")"
+  os_id="$(os_release_field "${OS_RELEASE_FILE}" ID)"
 
   if [[ "${os_id}" != "debian" ]]; then
     print_error_msg "... the script runs on Debian only, the current system is ${os_id:-unknown}"
+    return 1
+  fi
+
+  # В Debian testing и sid поля VERSION_ID нет: это заведомо версии новее
+  # минимальной, поэтому проверка версии пропускается
+  os_version="$(os_release_field "${OS_RELEASE_FILE}" VERSION_ID)"
+
+  if [[ -n "${os_version}" && "${os_version%%.*}" -lt "${DEBIAN_MIN_VERSION}" ]]; then
+    print_error_msg "... the script requires Debian ${CL_BOLD}${DEBIAN_MIN_VERSION}${CL_NO} or newer, the current version is ${os_version}"
     return 1
   fi
 }
@@ -326,6 +339,12 @@ configure_superuser() {
   ensure_superuser_ssh_key "${key_dir}" "${key_file}"
   authorize_superuser_ssh_key "${key_dir}" "${key_file}.pub"
   show_superuser_ssh_key "${key_file}"
+}
+
+# Значение поля <имя> из файла os-release без кавычек
+os_release_field() {
+
+  sed --quiet --regexp-extended "s/^$2=\"?([^\"]*)\"?\$/\1/p" "$1"
 }
 
 # Спрашивает имя суперпользователя, пока не введено допустимое, и записывает его в

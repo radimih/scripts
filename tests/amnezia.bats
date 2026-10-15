@@ -12,6 +12,8 @@
 # - на системе, отличной от Debian, скрипт завершается с ошибкой, не трогая
 #   настройки консоли и часовой пояс;
 # - то же самое, если ID системы не определён или нет /etc/os-release;
+# - то же самое, если версия Debian ниже минимальной поддерживаемой (13); в
+#   Debian testing и sid поля VERSION_ID нет, поэтому там версия не проверяется;
 # - часовой пояс задаётся символической ссылкой /etc/localtime на файл зоны
 #   /usr/share/zoneinfo/Asia/Novosibirsk, а в сообщении шага значение часового
 #   пояса выделено жирным;
@@ -342,6 +344,39 @@ dockerfile_apt_packages() {
   [[ "$output" == *"the current system is unknown"* ]]
   # Настройка консоли не выполняется: проверка ОС идёт первой.
   assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+}
+
+@test "fails on Debian older than the minimum version" {
+  printf 'ID=debian\nVERSION_ID="11"\n' > "$OS_RELEASE_FILE"
+
+  run_script
+
+  [ "$status" -ne 0 ]
+  # Минимальная версия выводится выделенной (жирным).
+  local bold=$'\033[1m'
+  local reset=$'\033[0m'
+  [[ "$output" == *"requires Debian ${bold}13${reset} or newer, the current version is 11"* ]]
+  # Настройка консоли не выполняется: проверка ОС идёт первой.
+  assert_has_line 'CODESET="guess"' "$CONSOLE_SETUP_FILE"
+  # Часовой пояс тоже не меняется: его шаг идёт сразу после проверки ОС.
+  assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
+}
+
+@test "accepts the minimum supported Debian version" {
+  printf 'ID=debian\nVERSION_ID="13"\n' > "$OS_RELEASE_FILE"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+}
+
+@test "skips the version check when the Debian version is not specified" {
+  # В Debian testing и sid поля VERSION_ID нет.
+  printf 'ID=debian\nVERSION_CODENAME=forky\n' > "$OS_RELEASE_FILE"
+
+  run_script
+
+  [ "$status" -eq 0 ]
 }
 
 @test "fails when the OS release file is missing" {
