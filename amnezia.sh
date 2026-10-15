@@ -188,6 +188,12 @@ check_debian() {
   fi
 }
 
+# Значение поля <имя> из файла os-release без кавычек
+os_release_field() {
+
+  sed --quiet --regexp-extended "s/^$2=\"?([^\"]*)\"?\$/\1/p" "$1"
+}
+
 check_root() {
 
   print_step_msg "Checking root privileges"
@@ -196,6 +202,34 @@ check_root() {
     print_error_msg "... the script must be run as root, the current user is $(id --user --name)"
     return 1
   fi
+}
+
+install_apt_packages() {
+
+  print_step_msg "Installing apt packages"
+
+  apt-get update
+
+  DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
+}
+
+configure_linux_console() {
+
+  local key
+
+  print_step_msg "Configuring the Linux console"
+
+  if [[ ! -f "${CONSOLE_SETUP_FILE}" ]]; then
+    print_error_msg "... the file ${CONSOLE_SETUP_FILE} does not exist, install the console-setup package first"
+    return 1
+  fi
+
+  print_info_msg "Updating ${CONSOLE_SETUP_FILE}"
+  for key in "${!CONSOLE_SETUP_PARAMS[@]}"; do
+    set_config_param "${CONSOLE_SETUP_FILE}" "${key}" "${key}=\"${CONSOLE_SETUP_PARAMS[${key}]}\""
+  done
+
+  setupcon
 }
 
 configure_time_zone() {
@@ -234,54 +268,95 @@ configure_motd() {
   : > "${MOTD_STATIC_FILE}"
 }
 
-install_apt_packages() {
+# Записывает в файл <файл> скрипт формирования сообщения дня
+write_motd_script() {
 
-  print_step_msg "Installing apt packages"
+  local file="$1"
 
-  apt-get update
+  cat > "${file}" <<'MOTD'
+#!/usr/bin/env bash
 
-  DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
+# Сообщение дня: основные характеристики хоста, текущее потребление ресурсов и
+# время работы. Скрипт выполняет pam_motd при каждом входе, поэтому значения в
+# нём всегда свежие. Используются утилиты ip, free, uptime и df.
+
+# Разбор вывода утилит опирается на англоязычные подписи
+export LC_ALL=C
+
+# Подписи полей выделяются жирным
+BOLD=$'\033[1m'
+RESET=$'\033[0m'
+
+# Название операционной системы
+os_name() {
+  sed --quiet --regexp-extended 's/^PRETTY_NAME="(.*)"$/\1/p' /etc/os-release
 }
 
-configure_ssh() {
+# Основной IP-адрес: адрес, через который хост выходит в сеть
+ip_address() {
+  ip route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1) }'
+}
 
-  local key
-  local param
+# Время работы
+uptime_text() {
+  uptime --pretty | sed --regexp-extended 's/^up //'
+}
 
-  print_step_msg "Configuring SSH access"
+# Средняя загрузка за 1, 5 и 15 минут
+load_text() {
+  uptime | sed --regexp-extended 's/.*load average: //'
+}
 
-  if [[ ! -d "${SSHD_CONFIG_DIR}" ]]; then
-    print_error_msg "... the directory ${SSHD_CONFIG_DIR} does not exist, install the openssh-server package first"
-    return 1
-  fi
+# Потребление памяти: <использовано> из <всего> и доля в процентах
+memory_usage() {
+  free --kibi | awk '/^Mem:/ { printf "%.1f GiB / %.1f GiB (%d%%)", $3 / 1048576, $2 / 1048576, $3 * 100 / $2 }'
+}
 
-  print_info_msg "Updating ${SSHD_CONFIG_FILE}"
-  for param in "${SSHD_CONFIG_PARAMS[@]}"; do
-    key="${param%%=*}"
-    set_sshd_config_param "${SSHD_CONFIG_FILE}" "${key}" "${key} ${param#*=}"
+# Потребление диска: <использовано> из <всего> и доля в процентах
+disk_usage() {
+  df --portability / | awk 'NR == 2 { printf "%.1f GiB / %.1f GiB (%s)", $3 / 1048576, $2 / 1048576, $5 }'
+}
+
+# Наибольшая длина среди аргументов
+max_length() {
+  local length=0
+  local value
+
+  for value in "$@"; do
+    if (( ${#value} > length )); then
+      length=${#value}
+    fi
   done
 
-  systemctl reload ssh
+  printf '%d' "${length}"
 }
 
-configure_firewall() {
+# Строка таблицы: <подпись> и <значение> левого столбца, затем правого
+row() {
+  printf '%s%-*s%s  %-*s  %s%-*s%s  %s\n' \
+    "${BOLD}" "${LABEL_WIDTH}" "$1" "${RESET}" "${VALUE_WIDTH}" "$2" \
+    "${BOLD}" "${LABEL_WIDTH}" "$3" "${RESET}" "$4"
+}
 
-  print_step_msg "Configuring the firewall"
+left_labels=(OS Kernel Host IP)
+left_values=("$(os_name)" "$(uname --kernel-release)" "$(hostname)" "$(ip_address)")
 
-  if [[ ! -d "${UFW_DIR}" ]]; then
-    print_error_msg "... the directory ${UFW_DIR} does not exist, install the ufw package first"
-    return 1
-  fi
+right_labels=(Uptime Load Memory Disk)
+right_values=(
+  "$(uptime_text)"
+  "$(load_text) ($(nproc) cores)"
+  "$(memory_usage)"
+  "$(disk_usage)"
+)
 
-  # Перенаправляемые (routed) соединения — транзитный трафик клиентов VPN.
-  print_info_msg "Denying incoming connections except ssh and allowing outgoing and routed connections"
-  ufw default deny incoming
-  ufw default allow outgoing
-  ufw default allow routed
-  ufw allow ssh
+LABEL_WIDTH="$(max_length "${left_labels[@]}" "${right_labels[@]}")"
+VALUE_WIDTH="$(max_length "${left_values[@]}")"
 
-  print_info_msg "Enabling the firewall"
-  ufw --force enable
+for (( index = 0; index < ${#left_labels[@]}; index++ )); do
+  row "${left_labels[index]}" "${left_values[index]}" "${right_labels[index]}" "${right_values[index]}"
+done
+MOTD
+  chmod 0755 "${file}"
 }
 
 configure_automatic_upgrades() {
@@ -309,6 +384,12 @@ configure_automatic_upgrades() {
   done
 }
 
+# Задаёт параметр вида <параметр> "<значение>"; (файлы apt.conf)
+set_apt_conf_param() {
+
+  set_config_line "$1" "^[[:space:]]*(//)?[[:space:]]*$2[[:space:]]+" "$3"
+}
+
 configure_router_sysctl() {
 
   local param
@@ -330,23 +411,51 @@ configure_router_sysctl() {
   sysctl --load="${SYSCTL_FILE}"
 }
 
-configure_linux_console() {
+configure_ssh() {
 
   local key
+  local param
 
-  print_step_msg "Configuring the Linux console"
+  print_step_msg "Configuring SSH access"
 
-  if [[ ! -f "${CONSOLE_SETUP_FILE}" ]]; then
-    print_error_msg "... the file ${CONSOLE_SETUP_FILE} does not exist, install the console-setup package first"
+  if [[ ! -d "${SSHD_CONFIG_DIR}" ]]; then
+    print_error_msg "... the directory ${SSHD_CONFIG_DIR} does not exist, install the openssh-server package first"
     return 1
   fi
 
-  print_info_msg "Updating ${CONSOLE_SETUP_FILE}"
-  for key in "${!CONSOLE_SETUP_PARAMS[@]}"; do
-    set_config_param "${CONSOLE_SETUP_FILE}" "${key}" "${key}=\"${CONSOLE_SETUP_PARAMS[${key}]}\""
+  print_info_msg "Updating ${SSHD_CONFIG_FILE}"
+  for param in "${SSHD_CONFIG_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_sshd_config_param "${SSHD_CONFIG_FILE}" "${key}" "${key} ${param#*=}"
   done
 
-  setupcon
+  systemctl reload ssh
+}
+
+# Задаёт параметр вида <параметр> <значение> (файл sshd_config)
+set_sshd_config_param() {
+
+  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]+" "$3"
+}
+
+configure_firewall() {
+
+  print_step_msg "Configuring the firewall"
+
+  if [[ ! -d "${UFW_DIR}" ]]; then
+    print_error_msg "... the directory ${UFW_DIR} does not exist, install the ufw package first"
+    return 1
+  fi
+
+  # Перенаправляемые (routed) соединения — транзитный трафик клиентов VPN.
+  print_info_msg "Denying incoming connections except ssh and allowing outgoing and routed connections"
+  ufw default deny incoming
+  ufw default allow outgoing
+  ufw default allow routed
+  ufw allow ssh
+
+  print_info_msg "Enabling the firewall"
+  ufw --force enable
 }
 
 configure_docker() {
@@ -393,12 +502,6 @@ configure_superuser() {
   ensure_superuser_ssh_key "${key_dir}" "${key_file}"
   authorize_superuser_ssh_key "${key_dir}" "${key_file}.pub"
   show_superuser_ssh_key "${key_file}"
-}
-
-# Значение поля <имя> из файла os-release без кавычек
-os_release_field() {
-
-  sed --quiet --regexp-extended "s/^$2=\"?([^\"]*)\"?\$/\1/p" "$1"
 }
 
 # Спрашивает имя суперпользователя, пока не введено допустимое, и записывает его в
@@ -498,135 +601,6 @@ show_superuser_ssh_key() {
   qrencode -t UTF8 --margin=2 < "$1"
 }
 
-# Задаёт в файле строку <строка>: если она уже есть — ничего не делает; иначе
-# заменяет строку, подходящую под шаблон <шаблон> (в том числе
-# закомментированную), или добавляет <строка> последней строкой файла
-set_config_line() {
-
-  local file="$1"
-  local pattern="$2"
-  local line="$3"
-
-  if grep --silent --no-messages --fixed-strings --line-regexp -- "${line}" "${file}"; then
-    return 0
-  fi
-
-  if grep --silent --no-messages --extended-regexp -- "${pattern}" "${file}"; then
-    sed --in-place --regexp-extended "s|${pattern}.*|${line}|" "${file}"
-  else
-    echo "${line}" >> "${file}"
-  fi
-}
-
-# Задаёт параметр вида <параметр>=<значение> (файлы sysctl и console-setup)
-set_config_param() {
-
-  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]*=" "$3"
-}
-
-# Задаёт параметр вида <параметр> "<значение>"; (файлы apt.conf)
-set_apt_conf_param() {
-
-  set_config_line "$1" "^[[:space:]]*(//)?[[:space:]]*$2[[:space:]]+" "$3"
-}
-
-# Задаёт параметр вида <параметр> <значение> (файл sshd_config)
-set_sshd_config_param() {
-
-  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]+" "$3"
-}
-
-# Записывает в файл <файл> скрипт формирования сообщения дня
-write_motd_script() {
-
-  local file="$1"
-
-  cat > "${file}" <<'MOTD'
-#!/usr/bin/env bash
-
-# Сообщение дня: основные характеристики хоста, текущее потребление ресурсов и
-# время работы. Скрипт выполняет pam_motd при каждом входе, поэтому значения в
-# нём всегда свежие. Используются утилиты ip, free, uptime и df.
-
-# Разбор вывода утилит опирается на англоязычные подписи
-export LC_ALL=C
-
-# Подписи полей выделяются жирным
-BOLD=$'\033[1m'
-RESET=$'\033[0m'
-
-# Название операционной системы
-os_name() {
-  sed --quiet --regexp-extended 's/^PRETTY_NAME="(.*)"$/\1/p' /etc/os-release
-}
-
-# Основной IP-адрес: адрес, через который хост выходит в сеть
-ip_address() {
-  ip route get 1.1.1.1 | awk '{ for (i = 1; i < NF; i++) if ($i == "src") print $(i + 1) }'
-}
-
-# Время работы
-uptime_text() {
-  uptime --pretty | sed --regexp-extended 's/^up //'
-}
-
-# Средняя загрузка за 1, 5 и 15 минут
-load_text() {
-  uptime | sed --regexp-extended 's/.*load average: //'
-}
-
-# Потребление памяти: <использовано> из <всего> и доля в процентах
-memory_usage() {
-  free --kibi | awk '/^Mem:/ { printf "%.1f GiB / %.1f GiB (%d%%)", $3 / 1048576, $2 / 1048576, $3 * 100 / $2 }'
-}
-
-# Потребление диска: <использовано> из <всего> и доля в процентах
-disk_usage() {
-  df --portability / | awk 'NR == 2 { printf "%.1f GiB / %.1f GiB (%s)", $3 / 1048576, $2 / 1048576, $5 }'
-}
-
-# Наибольшая длина среди аргументов
-max_length() {
-  local length=0
-  local value
-
-  for value in "$@"; do
-    if (( ${#value} > length )); then
-      length=${#value}
-    fi
-  done
-
-  printf '%d' "${length}"
-}
-
-# Строка таблицы: <подпись> и <значение> левого столбца, затем правого
-row() {
-  printf '%s%-*s%s  %-*s  %s%-*s%s  %s\n' \
-    "${BOLD}" "${LABEL_WIDTH}" "$1" "${RESET}" "${VALUE_WIDTH}" "$2" \
-    "${BOLD}" "${LABEL_WIDTH}" "$3" "${RESET}" "$4"
-}
-
-left_labels=(OS Kernel Host IP)
-left_values=("$(os_name)" "$(uname --kernel-release)" "$(hostname)" "$(ip_address)")
-
-right_labels=(Uptime Load Memory Disk)
-right_values=(
-  "$(uptime_text)"
-  "$(load_text) ($(nproc) cores)"
-  "$(memory_usage)"
-  "$(disk_usage)"
-)
-
-LABEL_WIDTH="$(max_length "${left_labels[@]}" "${right_labels[@]}")"
-VALUE_WIDTH="$(max_length "${left_values[@]}")"
-
-for (( index = 0; index < ${#left_labels[@]}; index++ )); do
-  row "${left_labels[index]}" "${left_values[index]}" "${right_labels[index]}" "${right_values[index]}"
-done
-MOTD
-  chmod 0755 "${file}"
-}
-
 print_error_msg() {
 
   echo
@@ -657,6 +631,32 @@ print_step_msg() {
   fi
 
   printf "\\n${CL_GREEN}%s%s${CL_NO}\\n\\n" "${filler}" "${msg}"
+}
+
+# Задаёт в файле строку <строка>: если она уже есть — ничего не делает; иначе
+# заменяет строку, подходящую под шаблон <шаблон> (в том числе
+# закомментированную), или добавляет <строка> последней строкой файла
+set_config_line() {
+
+  local file="$1"
+  local pattern="$2"
+  local line="$3"
+
+  if grep --silent --no-messages --fixed-strings --line-regexp -- "${line}" "${file}"; then
+    return 0
+  fi
+
+  if grep --silent --no-messages --extended-regexp -- "${pattern}" "${file}"; then
+    sed --in-place --regexp-extended "s|${pattern}.*|${line}|" "${file}"
+  else
+    echo "${line}" >> "${file}"
+  fi
+}
+
+# Задаёт параметр вида <параметр>=<значение> (файлы sysctl и console-setup)
+set_config_param() {
+
+  set_config_line "$1" "^[[:space:]]*#?[[:space:]]*$2[[:space:]]*=" "$3"
 }
 
 main
