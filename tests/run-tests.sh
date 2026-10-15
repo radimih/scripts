@@ -34,8 +34,8 @@ $IMAGE_REPO:<script>, затем запускает tests/<script>.bats в ко�
 чтения, поэтому тесты не могут изменить файлы проекта.
 
 Примеры:
-  $(basename -- "$0") amnezia
-  $(basename -- "$0") amnezia --filter 'missing'
+  $(basename -- "$0") vpn
+  $(basename -- "$0") vpn --filter 'missing'
 
 Доступные скрипты: $(available_scripts | paste --serial --delimiters ' ')
 

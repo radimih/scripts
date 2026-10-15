@@ -1,5 +1,5 @@
-# Тестовый образ для amnezia.sh: базовое тестовое окружение Debian 13 плюс
-# пакеты, которые ставит сам скрипт (APT_PACKAGES в amnezia.sh). Сборка образа
+# Тестовый образ для vpn.sh: базовое тестовое окружение Debian 13 плюс
+# пакеты, которые ставит сам скрипт (APT_PACKAGES в vpn.sh). Сборка образа
 # заодно проверяет, что все имена пакетов есть в Debian 13.
 
 ARG BASE_IMAGE=scripts-test:debian
@@ -30,12 +30,12 @@ RUN apt-get update \
 # пакет unattended-upgrades) и файлов /etc/motd и
 # /etc/update-motd.d/10-uname (в том виде, в каком их ставит пакет base-files):
 # тесты восстанавливают из них исходное состояние перед каждым сценарием.
-RUN mkdir --parents /usr/share/amnezia-test \
- && cp /etc/default/console-setup /usr/share/amnezia-test/console-setup.pristine \
- && cp /etc/os-release /usr/share/amnezia-test/os-release.pristine \
- && cp --no-dereference /etc/localtime /usr/share/amnezia-test/localtime.pristine \
- && cp /usr/share/zoneinfo/Asia/Novosibirsk /usr/share/amnezia-test/novosibirsk.pristine \
- && cp /etc/apt/apt.conf.d/20auto-upgrades /usr/share/amnezia-test/20auto-upgrades.pristine \
- && cp /etc/apt/apt.conf.d/50unattended-upgrades /usr/share/amnezia-test/50unattended-upgrades.pristine \
- && cp /etc/motd /usr/share/amnezia-test/motd.pristine \
- && cp /etc/update-motd.d/10-uname /usr/share/amnezia-test/10-uname.pristine
+RUN mkdir --parents /usr/share/vpn-test \
+ && cp /etc/default/console-setup /usr/share/vpn-test/console-setup.pristine \
+ && cp /etc/os-release /usr/share/vpn-test/os-release.pristine \
+ && cp --no-dereference /etc/localtime /usr/share/vpn-test/localtime.pristine \
+ && cp /usr/share/zoneinfo/Asia/Novosibirsk /usr/share/vpn-test/novosibirsk.pristine \
+ && cp /etc/apt/apt.conf.d/20auto-upgrades /usr/share/vpn-test/20auto-upgrades.pristine \
+ && cp /etc/apt/apt.conf.d/50unattended-upgrades /usr/share/vpn-test/50unattended-upgrades.pristine \
+ && cp /etc/motd /usr/share/vpn-test/motd.pristine \
+ && cp /etc/update-motd.d/10-uname /usr/share/vpn-test/10-uname.pristine

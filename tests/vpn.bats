@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
 
-# Тесты для amnezia.sh.
+# Тесты для vpn.sh.
 #
 # Запускаются от имени root внутри контейнера Debian 13, в котором установлены
-# пакеты console-setup и openssh-server (см. amnezia.Dockerfile и run-tests.sh):
+# пакеты console-setup и openssh-server (см. vpn.Dockerfile и run-tests.sh):
 # скрипт читает /etc/os-release, правит реальный /etc/default/console-setup,
 # вызывает setupcon и пишет настройки sshd в /etc/ssh/sshd_config.d.
 #
@@ -101,7 +101,7 @@
 #   полем в два символа (qrencode -t UTF8 --margin=2);
 # - shellcheck не находит замечаний.
 
-SCRIPT_UNDER_TEST="${BATS_TEST_DIRNAME}/../amnezia.sh"
+SCRIPT_UNDER_TEST="${BATS_TEST_DIRNAME}/../vpn.sh"
 APT_CONF_DIR="/etc/apt/apt.conf.d"
 APT_AUTO_UPGRADES_FILE="${APT_CONF_DIR}/20auto-upgrades"
 APT_UNATTENDED_UPGRADES_FILE="${APT_CONF_DIR}/50unattended-upgrades"
@@ -135,14 +135,14 @@ CLEAR_SCREEN=$'\033[H\033[2J'
 # состояние перед каждым сценарием. Сюда же — /etc/localtime и файл зоны
 # /usr/share/zoneinfo/Asia/Novosibirsk, которые правит шаг настройки часового
 # пояса.
-APT_AUTO_UPGRADES_PRISTINE="/usr/share/amnezia-test/20auto-upgrades.pristine"
-CONSOLE_SETUP_PRISTINE="/usr/share/amnezia-test/console-setup.pristine"
-OS_RELEASE_PRISTINE="/usr/share/amnezia-test/os-release.pristine"
-TIME_ZONE_FILE_PRISTINE="/usr/share/amnezia-test/localtime.pristine"
-TIME_ZONE_INFO_PRISTINE="/usr/share/amnezia-test/novosibirsk.pristine"
-APT_UNATTENDED_UPGRADES_PRISTINE="/usr/share/amnezia-test/50unattended-upgrades.pristine"
-MOTD_STATIC_FILE_PRISTINE="/usr/share/amnezia-test/motd.pristine"
-MOTD_UNAME_FILE_PRISTINE="/usr/share/amnezia-test/10-uname.pristine"
+APT_AUTO_UPGRADES_PRISTINE="/usr/share/vpn-test/20auto-upgrades.pristine"
+CONSOLE_SETUP_PRISTINE="/usr/share/vpn-test/console-setup.pristine"
+OS_RELEASE_PRISTINE="/usr/share/vpn-test/os-release.pristine"
+TIME_ZONE_FILE_PRISTINE="/usr/share/vpn-test/localtime.pristine"
+TIME_ZONE_INFO_PRISTINE="/usr/share/vpn-test/novosibirsk.pristine"
+APT_UNATTENDED_UPGRADES_PRISTINE="/usr/share/vpn-test/50unattended-upgrades.pristine"
+MOTD_STATIC_FILE_PRISTINE="/usr/share/vpn-test/motd.pristine"
+MOTD_UNAME_FILE_PRISTINE="/usr/share/vpn-test/10-uname.pristine"
 
 setup() {
   mkdir --parents "$APT_CONF_DIR"
@@ -268,7 +268,7 @@ script_apt_packages() {
 dockerfile_apt_packages() {
   sed --quiet --regexp-extended \
       '/apt-get install/,/rm -rf/p' \
-      "${BATS_TEST_DIRNAME}/amnezia.Dockerfile" \
+      "${BATS_TEST_DIRNAME}/vpn.Dockerfile" \
     | grep --invert-match --fixed-strings -- '&&' \
     | tr --delete '[:blank:]\\'
 }

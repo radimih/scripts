@@ -2,7 +2,7 @@
 
 Репозиторий вспомогательных скриптов.
 
-## amnezia.sh
+## vpn.sh
 
 Скрипт для подготовки сервера под VPN:
 
@@ -29,7 +29,7 @@
 ### Запуск
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/radimih/scripts/main/amnezia.sh)
+bash <(wget -qO- https://raw.githubusercontent.com/radimih/scripts/main/vpn.sh)
 ```
 
 Скрипт в процессе работы запросит имя создаваемого суперпользователя.
@@ -40,7 +40,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/radimih/scripts/main/amnezia.
 [tests/README.md](tests/README.md).
 
 ```bash
-tests/run-tests.sh amnezia
+tests/run-tests.sh vpn
 ```
 
 ## Лицензия
