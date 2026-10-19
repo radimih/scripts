@@ -85,6 +85,10 @@ MOTD_STATIC_FILE=/etc/motd
 
 OS_RELEASE_FILE=/etc/os-release
 
+# Диапазон UID обычных пользователей системы
+REGULAR_USER_UID_MIN=1000
+REGULAR_USER_UID_MAX=60000
+
 # Каталог с дополнительными настройками sshd
 SSHD_CONFIG_DIR=/etc/ssh/sshd_config.d
 
@@ -474,6 +478,8 @@ configure_superuser() {
 
   print_step_msg "Configuring the superuser"
 
+  print_info_msg "Adding a new superuser or turning an existing regular user into the superuser"
+
   if [[ ! -d "${SUDOERS_DIR}" ]]; then
     print_error_msg "... the directory ${SUDOERS_DIR} does not exist, install the sudo package first"
     return 1
@@ -505,11 +511,12 @@ configure_superuser() {
 }
 
 # Спрашивает имя суперпользователя, пока не введено допустимое, и записывает его в
-# SUPERUSER_NAME; кончается неудачей, если ввод закончился (например, скрипт
-# запущен без терминала)
+# SUPERUSER_NAME. Перед вводом выводится список обычных пользователей.
 ask_superuser_name() {
 
   local name
+
+  show_regular_user_names
 
   while true; do
     if ! read -r -p "Enter the superuser name: " name; then
@@ -517,30 +524,69 @@ ask_superuser_name() {
       return 1
     fi
 
-    if is_valid_superuser_name "${name}"; then
-      SUPERUSER_NAME="${name}"
-      return 0
+    if ! is_valid_user_name "${name}"; then
+      print_info_msg "... the user name ${CL_BOLD}${name}${CL_NO} is invalid: use up to 32 lowercase latin letters, digits, underscores and hyphens, starting with a letter"
+      continue
     fi
 
-    print_info_msg "... the user name ${CL_BOLD}${name}${CL_NO} is invalid: use up to 32 lowercase latin letters, digits, underscores and hyphens, starting with a letter"
+    if is_system_user "${name}"; then
+      print_info_msg "... the user name ${CL_BOLD}${name}${CL_NO} belongs to a system user, choose another name"
+      continue
+    fi
+
+    SUPERUSER_NAME="${name}"
+    return 0
   done
 }
 
-# Проверяет, что имя годится для useradd: до 32 символов, начинается со строчной
-# латинской буквы, дальше идут строчные латинские буквы, цифры, подчёркивания и
-# дефисы (NAME_REGEX из /etc/adduser.conf)
-is_valid_superuser_name() {
+is_valid_user_name() {
 
   [[ ${#1} -le 32 && "$1" =~ ^[a-z][a-z0-9_-]*$ ]]
 }
 
-# Проверяет, что пользователь с таким именем есть в базе пользователей
+show_regular_user_names() {
+
+  local users
+
+  users="$(getent passwd \
+      | awk -F ':' -v min="${REGULAR_USER_UID_MIN}" -v max="${REGULAR_USER_UID_MAX}" \
+          '$3 >= min && $3 <= max { print $1 }' \
+      | paste --serial --delimiters ' ' -)"
+
+  if [[ -n "${users}" ]]; then
+    print_info_msg "Existing regular users: ${CL_BOLD}${users}${CL_NO}"
+  fi
+}
+
+is_regular_uid() {
+
+  local uid="$1"
+
+  [[ "${uid}" =~ ^[0-9]+$ ]] && (( uid >= REGULAR_USER_UID_MIN && uid <= REGULAR_USER_UID_MAX ))
+}
+
+# Проверяет, что <имя> — учётная запись системного пользователя: пользователь с
+# таким именем есть в базе, но его UID вне диапазона обычных пользователей.
+# Такие учётные записи (root, daemon, nobody и прочие) уже заняты системой, и
+# выдавать им права суперпользователя нельзя
+is_system_user() {
+
+  local uid
+
+  uid="$(user_uid "$1")" || return 1
+  ! is_regular_uid "${uid}"
+}
+
+user_uid() {
+
+  getent passwd "$1" | cut --delimiter=: --fields=3
+}
+
 user_exists() {
 
   id --user "$1" >/dev/null 2>&1
 }
 
-# Домашний каталог пользователя
 user_home_dir() {
 
   getent passwd "$1" | cut --delimiter=: --fields=6

@@ -81,9 +81,19 @@
 #   (systemctl enable --now docker), поэтому установленные Docker и Docker
 #   Compose готовы к работе;
 # - скрипт вызывает setupcon;
+# - перед настройкой скрипт сообщает, что будет добавлен новый суперпользователь
+#   или существующий обычный пользователь станет суперпользователем;
 # - скрипт спрашивает имя суперпользователя, пока не введено допустимое:
 #   недопустимое имя отвергается с внятным сообщением, а при отсутствии ввода
 #   скрипт завершается с ошибкой;
+# - имя, занятое системным пользователем (UID вне диапазона
+#   REGULAR_USER_UID_MIN..REGULAR_USER_UID_MAX), отвергается с внятным сообщением
+#   и спрашивается другое: такой учётной записи не выдают ни прав sudo, ни
+#   SSH-ключа (иначе, например, имя root или nobody открыло бы полный доступ к
+#   серверу);
+# - перед вводом имени выводится список обычных пользователей (имена выделены
+#   жирным), чтобы не ошибиться при повторном запуске для уже созданного
+#   суперпользователя;
 # - пользователь создаётся с домашним каталогом и оболочкой bash, если его ещё
 #   нет, и не пересоздаётся, если он есть;
 # - пользователь добавляется в группу администраторов sudo: членство в группе
@@ -880,6 +890,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Configuring the superuser"* ]]
+  [[ "$output" == *"Adding a new superuser or turning an existing regular user into the superuser"* ]]
   # На чистом экране первая строка — подпись User name: с именем, выделенным
   # жирным, вторая — заголовок, дальше — QR-код приватного ключа
   # (qrencode -t UTF8 --margin=2).
@@ -1000,6 +1011,47 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"is invalid"* ]]
   getent passwd "$SUPERUSER_NAME"
+}
+
+@test "asks again when the user name belongs to a system user" {
+  # root — UID 0 (ниже REGULAR_USER_UID_MIN), nobody — UID 65534 (выше
+  # REGULAR_USER_UID_MAX): обе системные учётные записи
+  run "$SCRIPT_UNDER_TEST" <<< $'root\nnobody\n'"$SUPERUSER_NAME"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the user name "*"root"*"belongs to a system user"* ]]
+  [[ "$output" == *"the user name "*"nobody"*"belongs to a system user"* ]]
+
+  # Системные учётные записи не трогаются: им не выдают ни прав sudo, ни ключа,
+  # а введённое следом имя принимается
+  local groups
+  groups="$(id --groups --name root)"
+  [[ " ${groups} " != *" ${SUPERUSER_GROUP} "* ]]
+  groups="$(id --groups --name nobody)"
+  [[ " ${groups} " != *" ${SUPERUSER_GROUP} "* ]]
+  [ ! -e /root/.ssh/id_ed25519 ]
+  [ ! -e /nonexistent/.ssh ]
+  assert_has_line "${SUPERUSER_NAME} ALL=(ALL:ALL) NOPASSWD:ALL" "$SUDOERS_FILE"
+  getent passwd "$SUPERUSER_NAME"
+}
+
+@test "shows the existing regular users so the name can be chosen" {
+  useradd --create-home --shell "$SUPERUSER_SHELL" "$SUPERUSER_NAME"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  # Список выводится перед вводом имени: по нему видно имя уже созданного
+  # суперпользователя, имя выделено жирным
+  local bold=$'\033[1m'
+  local reset=$'\033[0m'
+  local users_list
+  users_list="$(grep '^Existing regular users: ' <<< "$output" || true)"
+  [[ "$users_list" == *"${bold}${SUPERUSER_NAME}${reset}"* ]]
+  # В списке только обычные пользователи: системные учётные записи не попадают
+  [[ "$users_list" != *"root"* ]]
+  [[ "$users_list" != *"daemon"* ]]
+  [[ "$users_list" != *"nobody"* ]]
 }
 
 @test "fails with a clear message when no user name is entered" {
