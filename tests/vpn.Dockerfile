@@ -18,6 +18,7 @@ RUN apt-get update \
       procps \
       qrencode \
       sudo \
+      systemd-timesyncd \
       ufw \
       unattended-upgrades \
  && rm -rf /var/lib/apt/lists/*

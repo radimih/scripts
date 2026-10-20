@@ -17,6 +17,7 @@ APT_PACKAGES=(
   procps
   qrencode
   sudo
+  systemd-timesyncd
   ufw
   unattended-upgrades
 )
@@ -165,7 +166,7 @@ main() {
   check_root
   install_apt_packages
   configure_linux_console
-  configure_time_zone
+  configure_time
   configure_motd
   configure_journald
   configure_automatic_upgrades
@@ -249,11 +250,11 @@ configure_linux_console() {
   setupcon
 }
 
-configure_time_zone() {
+configure_time() {
 
   local zone_info
 
-  print_step_msg "Configuring the time zone"
+  print_step_msg "Configuring the time"
 
   zone_info="${TIME_ZONE_DIR}/${TIME_ZONE}"
 
@@ -264,6 +265,9 @@ configure_time_zone() {
 
   print_info_msg "Setting the time zone to ${CL_BOLD}${TIME_ZONE}${CL_NO} in ${TIME_ZONE_FILE}"
   ln --symbolic --force --no-dereference "${zone_info}" "${TIME_ZONE_FILE}"
+
+  print_info_msg "Enabling time synchronization"
+  timedatectl set-ntp true
 }
 
 configure_motd() {

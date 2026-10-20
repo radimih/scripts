@@ -19,10 +19,12 @@
 # - часовой пояс задаётся символической ссылкой /etc/localtime на файл зоны
 #   /usr/share/zoneinfo/Asia/Novosibirsk, а в сообщении шага значение часового
 #   пояса выделено жирным;
+# - после задания часового пояса синхронизация времени включается принудительно
+#   вызовом timedatectl set-ntp true;
 # - повторный запуск ссылку не меняет (идемпотентность);
 # - при отсутствии файла зоны скрипт завершается с ошибкой и внятным сообщением,
-#   не меняя /etc/localtime;
-# - шаг настройки часового пояса идёт до настройки автоматического обновления,
+#   не меняя /etc/localtime и не включая синхронизацию времени;
+# - шаг настройки времени идёт до настройки автоматического обновления,
 #   поэтому уже выполнен, когда тот завершается ошибкой;
 # - сообщение дня собирается скриптом /etc/update-motd.d/00-motd: его выполняет
 #   pam_motd при каждом входе, поэтому значения всегда свежие. Скрипт выводит две
@@ -83,7 +85,8 @@
 # - при отсутствии каталога /etc/apt/apt.conf.d скрипт завершается с ошибкой
 #   и внятным сообщением;
 # - перед установкой пакетов обновляется база пакетов, а сами пакеты ставятся
-#   в алфавитном порядке, включая docker.io, docker-cli и docker-compose;
+#   в алфавитном порядке, включая docker.io, docker-cli, docker-compose и
+#   systemd-timesyncd;
 # - список пакетов в тестовом образе совпадает с APT_PACKAGES в скрипте;
 # - служба Docker включается и запускается последним шагом
 #   (systemctl enable --now docker), поэтому установленные Docker и Docker
@@ -204,14 +207,14 @@ setup() {
   mkdir --parents "$SUDOERS_DIR"
   rm --force -- "$SUDOERS_FILE"
 
-  # apt-get, sysctl, systemctl и ufw не выполняются по-настоящему: тесты
-  # проверяют не установку пакетов и не применение настроек, а то, как скрипт их
-  # запускает. Заглушки записывают вызовы в файлы, чтобы тест мог проверить их
-  # состав и порядок.
+  # apt-get, sysctl, systemctl, timedatectl и ufw не выполняются по-настоящему:
+  # тесты проверяют не установку пакетов и не применение настроек, а то, как
+  # скрипт их запускает. Заглушки записывают вызовы в файлы, чтобы тест мог
+  # проверить их состав и порядок.
   local stub_dir="${BATS_TEST_TMPDIR}/bin"
   local name
   mkdir --parents "$stub_dir"
-  for name in apt-get sysctl systemctl ufw; do
+  for name in apt-get sysctl systemctl timedatectl ufw; do
     cat > "${stub_dir}/${name}" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/${name}.calls"
@@ -478,6 +481,14 @@ dockerfile_apt_packages() {
   assert_symlink_target "$TIME_ZONE_FILE" "$target_after_first"
 }
 
+@test "enables time synchronization with timedatectl" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Enabling time synchronization"* ]]
+  [ "$(cat "${BATS_TEST_TMPDIR}/timedatectl.calls")" = 'set-ntp true' ]
+}
+
 @test "fails with a clear message when the time zone data is missing" {
   rm -- "$TIME_ZONE_INFO_FILE"
 
@@ -485,8 +496,10 @@ dockerfile_apt_packages() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$TIME_ZONE_INFO_FILE"* ]]
-  # Файл зоны проверяется до правки ссылки, поэтому /etc/localtime не тронут.
+  # Файл зоны проверяется до правки ссылки и до включения синхронизации
+  # времени, поэтому /etc/localtime не тронут, а timedatectl не вызывался.
   assert_symlink_target "$TIME_ZONE_FILE" "${TIME_ZONE_DIR}/Etc/UTC"
+  [ ! -f "${BATS_TEST_TMPDIR}/timedatectl.calls" ]
 }
 
 @test "configures the message of the day" {
@@ -767,7 +780,7 @@ dockerfile_apt_packages() {
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io iproute2 openssh-client openssh-server procps qrencode sudo ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io iproute2 openssh-client openssh-server procps qrencode sudo systemd-timesyncd ufw unattended-upgrades' ]
 }
 
 @test "enables and starts the Docker service as the last step" {
