@@ -5,7 +5,8 @@
 # Запускаются от имени root внутри контейнера Debian 13, в котором установлены
 # пакеты console-setup и openssh-server (см. vpn.Dockerfile и run-tests.sh):
 # скрипт читает /etc/os-release, правит реальный /etc/default/console-setup,
-# вызывает setupcon и пишет настройки sshd в /etc/ssh/sshd_config.d.
+# пишет drop-in файл журнала systemd, вызывает setupcon и пишет настройки sshd
+# в /etc/ssh/sshd_config.d.
 #
 # Проверяется:
 #
@@ -36,6 +37,13 @@
 # - при отсутствии каталога /etc/update-motd.d скрипт завершается с ошибкой и
 #   внятным сообщением (шаг идёт после настройки часового пояса);
 # - скрипт сообщения дня проходит shellcheck;
+# - журнал systemd настраивается drop-in файлом
+#   /etc/systemd/journald.conf.d/99-storage.conf: в нём секция [Journal] с
+#   параметрами Storage=persistent и SystemMaxUse=128M, а файл настройки пакета
+#   /etc/systemd/journald.conf остаётся нетронутым; настройки видны в
+#   эффективной конфигурации (systemd-analyze cat-config); повторный запуск
+#   файл не меняет;
+# - журнал применяется перезапуском systemd-journald;
 # - настройки sshd записываются в файл ${SSHD_CONFIG_FILE}: вход по паролю и вход
 #   пользователем root запрещены, разрешён только вход по ключу;
 # - файл дополнительных настроек перекрывает настройки из других файлов каталога
@@ -116,6 +124,9 @@ APT_CONF_DIR="/etc/apt/apt.conf.d"
 APT_AUTO_UPGRADES_FILE="${APT_CONF_DIR}/20auto-upgrades"
 APT_UNATTENDED_UPGRADES_FILE="${APT_CONF_DIR}/50unattended-upgrades"
 CONSOLE_SETUP_FILE="/etc/default/console-setup"
+JOURNALD_CONFIG_DIR="/etc/systemd/journald.conf.d"
+JOURNALD_CONFIG_FILE="${JOURNALD_CONFIG_DIR}/99-storage.conf"
+JOURNALD_FILE="/etc/systemd/journald.conf"
 MOTD_DIR="/etc/update-motd.d"
 MOTD_FILE="${MOTD_DIR}/00-motd"
 MOTD_STATIC_FILE="/etc/motd"
@@ -171,6 +182,9 @@ setup() {
   rm --force -- "$MOTD_FILE"
   cp -- "$MOTD_STATIC_FILE_PRISTINE" "$MOTD_STATIC_FILE"
   cp -- "$MOTD_UNAME_FILE_PRISTINE" "$MOTD_UNAME_FILE"
+  # Журнал systemd: скрипт пишет свой drop-in файл, поэтому убираем файлы,
+  # созданные предыдущим сценарием.
+  rm --recursive --force -- "$JOURNALD_CONFIG_DIR"
   mkdir --parents "$SYSCTL_DIR"
   rm --force -- "$SYSCTL_FILE"
   # Каталог с настройками sshd: скрипт только добавляет в него свой файл,
@@ -571,6 +585,67 @@ dockerfile_apt_packages() {
   assert_symlink_target "$TIME_ZONE_FILE" "$TIME_ZONE_INFO_FILE"
 }
 
+@test "writes the journal settings into a drop-in file" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  # Путь к файлу выделен жирным.
+  local bold=$'\033[1m'
+  local reset=$'\033[0m'
+  [[ "$output" == *"Updating ${bold}${JOURNALD_CONFIG_FILE}${reset}"* ]]
+  assert_has_line '[Journal]' "$JOURNALD_CONFIG_FILE"
+  assert_has_line 'Storage=persistent' "$JOURNALD_CONFIG_FILE"
+  assert_has_line 'SystemMaxUse=128M' "$JOURNALD_CONFIG_FILE"
+  # Каждый из параметров задан ровно один раз.
+  [ "$(count_exact_lines 'Storage=persistent' "$JOURNALD_CONFIG_FILE")" -eq 1 ]
+  [ "$(count_exact_lines 'SystemMaxUse=128M' "$JOURNALD_CONFIG_FILE")" -eq 1 ]
+}
+
+@test "keeps the journal configuration file of the package untouched" {
+  local before
+  before="$(sha256sum "$JOURNALD_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  # Значения по умолчанию из файла пакета остаются на месте: правки живут в
+  # drop-in файле, а не в conffile.
+  [ "$(sha256sum "$JOURNALD_FILE")" = "$before" ]
+  assert_has_line '#Storage=auto' "$JOURNALD_FILE"
+}
+
+@test "the journal settings take effect" {
+  run_script
+  [ "$status" -eq 0 ]
+
+  run systemd-analyze cat-config systemd/journald.conf
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"${JOURNALD_CONFIG_FILE}"* ]]
+  # В эффективной конфигурации заданы именно наши значения.
+  [ "$(sed --quiet '/^Storage=/p' <<< "$output")" = 'Storage=persistent' ]
+  [ "$(sed --quiet '/^SystemMaxUse=/p' <<< "$output")" = 'SystemMaxUse=128M' ]
+}
+
+@test "is idempotent for the journal settings: a second run does not change the file" {
+  run_script
+  [ "$status" -eq 0 ]
+  local after_first
+  after_first="$(sha256sum "$JOURNALD_CONFIG_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$JOURNALD_CONFIG_FILE")" = "$after_first" ]
+}
+
+@test "applies the journal settings by restarting journald" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  assert_has_line 'restart systemd-journald' "${BATS_TEST_TMPDIR}/systemctl.calls"
+}
+
 @test "writes the SSH settings into a drop-in file and they take effect" {
   run_script
 
@@ -632,8 +707,8 @@ dockerfile_apt_packages() {
   assert_has_line 'CODESET="FullCyrSlav"' "$CONSOLE_SETUP_FILE"
   assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
   # Служба Docker включается последним шагом, до неё дело не дошло; sshd тоже не
-  # перезагружался, поэтому systemctl не вызывался.
-  [ ! -f "${BATS_TEST_TMPDIR}/systemctl.calls" ]
+  # перезагружался: единственный вызов systemctl — перезапуск journald.
+  [ "$(cat "${BATS_TEST_TMPDIR}/systemctl.calls")" = 'restart systemd-journald' ]
 }
 
 @test "leaves only ssh open for incoming connections and allows all outgoing ones" {
@@ -701,10 +776,10 @@ dockerfile_apt_packages() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Configuring Docker"* ]]
   [[ "$output" == *"Enabling and starting the Docker service"* ]]
-  # Служба включается последним шагом: единственный вызов systemctl до него —
-  # перезагрузка sshd.
+  # Служба включается последним шагом: вызовы systemctl до него — перезапуск
+  # journald и перезагрузка sshd.
   [ "$(cat "${BATS_TEST_TMPDIR}/systemctl.calls")" \
-      = $'reload ssh\nenable --now docker' ]
+      = $'restart systemd-journald\nreload ssh\nenable --now docker' ]
 }
 
 @test "writes the kernel parameters for the router role" {

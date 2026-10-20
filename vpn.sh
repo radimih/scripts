@@ -67,6 +67,18 @@ declare -A CONSOLE_SETUP_PARAMS=(
 # Минимальная поддерживаемая версия Debian
 DEBIAN_MIN_VERSION=13
 
+# Каталог дополнительных настроек журнала systemd
+JOURNALD_CONFIG_DIR=/etc/systemd/journald.conf.d
+
+# Файл дополнительных настроек журнала systemd
+JOURNALD_CONFIG_FILE=${JOURNALD_CONFIG_DIR}/99-storage.conf
+
+# Параметры журнала в форме <параметр>=<значение>
+JOURNALD_PARAMS=(
+  Storage=persistent
+  SystemMaxUse=128M
+)
+
 # Каталог со скриптами, которые pam_motd выполняет при каждом входе
 MOTD_DIR=/etc/update-motd.d
 
@@ -155,6 +167,7 @@ main() {
   configure_linux_console
   configure_time_zone
   configure_motd
+  configure_journald
   configure_automatic_upgrades
   configure_router_sysctl
   configure_ssh
@@ -361,6 +374,25 @@ for (( index = 0; index < ${#left_labels[@]}; index++ )); do
 done
 MOTD
   chmod 0755 "${file}"
+}
+
+configure_journald() {
+
+  local param
+
+  print_step_msg "Configuring the systemd journal"
+
+  print_info_msg "Updating ${CL_BOLD}${JOURNALD_CONFIG_FILE}${CL_NO}"
+  install --directory --mode 0755 "${JOURNALD_CONFIG_DIR}"
+
+  {
+    printf '[Journal]\n'
+    for param in "${JOURNALD_PARAMS[@]}"; do
+      printf '%s\n' "${param}"
+    done
+  } > "${JOURNALD_CONFIG_FILE}"
+
+  systemctl restart systemd-journald
 }
 
 configure_automatic_upgrades() {
