@@ -68,6 +68,21 @@
 # - повторный запуск не меняет файл (идемпотентность);
 # - при отсутствии /etc/default/console-setup скрипт завершается с ошибкой
 #   и внятным сообщением;
+# - в /etc/locale.gen раскомментируются строки локалей en_US.UTF-8 и ru_RU.UTF-8,
+#   а остальные строки файла не меняются; локали собираются вызовом locale-gen;
+# - в /etc/locale.conf записываются LANG=en_US.UTF-8 (локаль по умолчанию) и
+#   русские форматы для LC_ADDRESS, LC_IDENTIFICATION, LC_MEASUREMENT,
+#   LC_MONETARY, LC_NAME, LC_NUMERIC, LC_PAPER, LC_TELEPHONE и LC_TIME; у
+#   LC_CTYPE, LC_COLLATE и LC_MESSAGES своих строк нет, поэтому они берут значение
+#   из LANG;
+# - настройки, которые уже есть с другим значением, заменяются на месте; повторный
+#   запуск файлы не меняет (идемпотентность);
+# - локаль применяется и в текущей сессии: переменные экспортируются, а LC_ALL
+#   снимается, иначе он перекрыл бы остальные;
+# - настройки из /etc/locale.conf дают русские форматы при английских
+#   сообщениях;
+# - при отсутствии /etc/locale.gen скрипт завершается с ошибкой и внятным
+#   сообщением, не трогая /etc/locale.conf;
 # - параметры ядра из SYSCTL_PARAMS записываются в /etc/sysctl.d/9999-router.conf:
 #   нужные строки заменяются на месте, остальное содержимое файла не меняется,
 #   повторный запуск файл не меняет;
@@ -130,6 +145,21 @@ CONSOLE_SETUP_FILE="/etc/default/console-setup"
 JOURNALD_CONFIG_DIR="/etc/systemd/journald.conf.d"
 JOURNALD_CONFIG_FILE="${JOURNALD_CONFIG_DIR}/99-storage.conf"
 JOURNALD_FILE="/etc/systemd/journald.conf"
+LOCALE_CONF_FILE="/etc/locale.conf"
+LOCALE_GEN_FILE="/etc/locale.gen"
+LOCALE_DEFAULT="en_US.UTF-8"
+LOCALE_NAMES=("en_US.UTF-8" "ru_RU.UTF-8")
+LOCALE_PARAMS=(
+  LC_ADDRESS=ru_RU.UTF-8
+  LC_IDENTIFICATION=ru_RU.UTF-8
+  LC_MEASUREMENT=ru_RU.UTF-8
+  LC_MONETARY=ru_RU.UTF-8
+  LC_NAME=ru_RU.UTF-8
+  LC_NUMERIC=ru_RU.UTF-8
+  LC_PAPER=ru_RU.UTF-8
+  LC_TELEPHONE=ru_RU.UTF-8
+  LC_TIME=ru_RU.UTF-8
+)
 MOTD_DIR="/etc/update-motd.d"
 MOTD_FILE="${MOTD_DIR}/00-motd"
 MOTD_STATIC_FILE="/etc/motd"
@@ -161,6 +191,8 @@ CLEAR_SCREEN=$'\033[H\033[2J'
 # пояса.
 APT_AUTO_UPGRADES_PRISTINE="/usr/share/vpn-test/20auto-upgrades.pristine"
 CONSOLE_SETUP_PRISTINE="/usr/share/vpn-test/console-setup.pristine"
+LOCALE_CONF_PRISTINE="/usr/share/vpn-test/locale.conf.pristine"
+LOCALE_GEN_PRISTINE="/usr/share/vpn-test/locale.gen.pristine"
 OS_RELEASE_PRISTINE="/usr/share/vpn-test/os-release.pristine"
 TIME_ZONE_FILE_PRISTINE="/usr/share/vpn-test/localtime.pristine"
 TIME_ZONE_INFO_PRISTINE="/usr/share/vpn-test/novosibirsk.pristine"
@@ -174,6 +206,12 @@ setup() {
   cp -- "$APT_UNATTENDED_UPGRADES_PRISTINE" "$APT_UNATTENDED_UPGRADES_FILE"
   cp -- "$CONSOLE_SETUP_PRISTINE" "$CONSOLE_SETUP_FILE"
   cp -- "$OS_RELEASE_PRISTINE" "$OS_RELEASE_FILE"
+  # Локали: скрипт раскомментирует строки в /etc/locale.gen и пишет /etc/locale.conf
+  # (через символическую ссылку /etc/default/locale его читает pam_env), поэтому
+  # возвращаем исходное состояние. Сгенерированные локали остаются в
+  # /usr/lib/locale/locale-archive: они не влияют на содержимое файлов.
+  cp -- "$LOCALE_GEN_PRISTINE" "$LOCALE_GEN_FILE"
+  cp -- "$LOCALE_CONF_PRISTINE" "$LOCALE_CONF_FILE"
   # /etc/localtime — символическая ссылка, поэтому обычный cp записал бы через
   # неё в файл зоны: нужны --remove-destination и --no-dereference.
   cp --remove-destination --no-dereference "$TIME_ZONE_FILE_PRISTINE" "$TIME_ZONE_FILE"
@@ -221,6 +259,13 @@ printf '%s\n' "\$*" >> "${BATS_TEST_TMPDIR}/${name}.calls"
 EOF
     chmod +x "${stub_dir}/${name}"
   done
+  # locale-gen собирает локали несколько секунд, а тесты проверяют не сборку, а
+  # то, что скрипт его запускает: заглушка только отмечает вызов
+  cat > "${stub_dir}/locale-gen" <<EOF
+#!/usr/bin/env bash
+echo called > "${BATS_TEST_TMPDIR}/locale-gen.called"
+EOF
+  chmod +x "${stub_dir}/locale-gen"
   export PATH="${stub_dir}:${PATH}"
 }
 
@@ -377,6 +422,134 @@ dockerfile_apt_packages() {
 
   [ "$status" -ne 0 ]
   [[ "$output" == *"$CONSOLE_SETUP_FILE"* ]]
+}
+
+@test "enables the required locales and generates them" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Enabling the locales "*" in ${LOCALE_GEN_FILE}"* ]]
+  [[ "$output" == *"Generating the locales"* ]]
+  assert_has_line 'en_US.UTF-8 UTF-8' "$LOCALE_GEN_FILE"
+  assert_has_line 'ru_RU.UTF-8 UTF-8' "$LOCALE_GEN_FILE"
+  # Остальные строки файла, включая другие локали, не меняются
+  [ "$(count_exact_lines '# en_GB.UTF-8 UTF-8' "$LOCALE_GEN_FILE")" -eq 1 ]
+  [ -f "${BATS_TEST_TMPDIR}/locale-gen.called" ]
+}
+
+@test "writes the locale settings into the locale configuration file" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Updating ${LOCALE_CONF_FILE}"* ]]
+  # Локаль по умолчанию — английская, а форматы даты и времени, чисел, денег,
+  # адресов, имён и телефонов — русские
+  assert_has_line "LANG=${LOCALE_DEFAULT}" "$LOCALE_CONF_FILE"
+  local param
+  for param in "${LOCALE_PARAMS[@]}"; do
+    assert_has_line "$param" "$LOCALE_CONF_FILE"
+  done
+}
+
+@test "leaves the categories without a value of their own to the default locale" {
+  run_script
+
+  [ "$status" -eq 0 ]
+  # Своих строк у них нет, поэтому они берут значение из LANG
+  local param
+  for param in LC_CTYPE LC_COLLATE LC_MESSAGES LC_ALL; do
+    run grep --quiet "^${param}=" "$LOCALE_CONF_FILE"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "replaces locale settings that already have a different value in place" {
+  printf 'LANG=de_DE.UTF-8\nLC_TIME=de_DE.UTF-8\n' > "$LOCALE_CONF_FILE"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [ "$(count_exact_lines 'LANG=de_DE.UTF-8' "$LOCALE_CONF_FILE")" -eq 0 ]
+  [ "$(count_exact_lines 'LC_TIME=de_DE.UTF-8' "$LOCALE_CONF_FILE")" -eq 0 ]
+  [ "$(count_exact_lines 'LC_TIME=ru_RU.UTF-8' "$LOCALE_CONF_FILE")" -eq 1 ]
+  # Заменённые строки остаются на своих местах, а не дублируются в конце файла
+  [ "$(sed --quiet --expression='1p' "$LOCALE_CONF_FILE")" = "LANG=${LOCALE_DEFAULT}" ]
+  [ "$(sed --quiet --expression='2p' "$LOCALE_CONF_FILE")" = 'LC_TIME=ru_RU.UTF-8' ]
+}
+
+@test "is idempotent for the locale: a second run does not change the files" {
+  run_script
+  [ "$status" -eq 0 ]
+  local gen_after_first
+  local conf_after_first
+  gen_after_first="$(sha256sum "$LOCALE_GEN_FILE")"
+  conf_after_first="$(sha256sum "$LOCALE_CONF_FILE")"
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  [ "$(sha256sum "$LOCALE_GEN_FILE")" = "$gen_after_first" ]
+  [ "$(sha256sum "$LOCALE_CONF_FILE")" = "$conf_after_first" ]
+}
+
+@test "applies the locale in the current session" {
+  local stub_dir="${BATS_TEST_TMPDIR}/bin"
+  mkdir --parents "$stub_dir"
+  # setupcon вызывается следующим шагом, поэтому по его окружению видно, что
+  # локаль применена в текущей сессии скрипта; LC_ALL при этом снимается, иначе
+  # он перекрыл бы остальные переменные
+  cat > "${stub_dir}/setupcon" <<EOF
+#!/usr/bin/env bash
+env > "${BATS_TEST_TMPDIR}/setupcon.env"
+EOF
+  chmod +x "${stub_dir}/setupcon"
+  export PATH="${stub_dir}:${PATH}"
+
+  run env LC_ALL=C "$SCRIPT_UNDER_TEST" <<< "$SUPERUSER_NAME"
+
+  [ "$status" -eq 0 ]
+  local env_dump="${BATS_TEST_TMPDIR}/setupcon.env"
+  assert_has_line "LANG=${LOCALE_DEFAULT}" "$env_dump"
+  local param
+  for param in "${LOCALE_PARAMS[@]}"; do
+    assert_has_line "$param" "$env_dump"
+  done
+  [ "$(count_exact_lines 'LC_ALL=C' "$env_dump")" -eq 0 ]
+}
+
+@test "generates the locale data so that the settings take effect" {
+  # Этот сценарий проверяет настоящую сборку локалей, поэтому убирает заглушку
+  # locale-gen и собранные в образе локали
+  rm --force -- "${BATS_TEST_TMPDIR}/bin/locale-gen"
+  rm --force -- /usr/lib/locale/locale-archive
+
+  run_script
+
+  [ "$status" -eq 0 ]
+  run locale --all-locales
+  [[ "$output" == *"en_US.utf8"* ]]
+  [[ "$output" == *"ru_RU.utf8"* ]]
+  # Написанные настройки дают русские форматы при английских сообщениях
+  run bash -c "set -a; . '$LOCALE_CONF_FILE'; locale"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'LC_TIME=ru_RU.UTF-8'* ]]
+  [[ "$output" == *'LC_MONETARY=ru_RU.UTF-8'* ]]
+  [[ "$output" == *'LC_CTYPE="en_US.UTF-8"'* ]]
+  [[ "$output" == *'LC_MESSAGES="en_US.UTF-8"'* ]]
+}
+
+@test "fails with a clear message when the locale list is missing" {
+  rm -- "$LOCALE_GEN_FILE"
+  local conf_before
+  conf_before="$(sha256sum "$LOCALE_CONF_FILE")"
+
+  run_script
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$LOCALE_GEN_FILE"* ]]
+  # Шаг идёт сразу после установки пакетов, поэтому локаль не настроена
+  [ "$(sha256sum "$LOCALE_CONF_FILE")" = "$conf_before" ]
+  [ ! -f "${BATS_TEST_TMPDIR}/locale-gen.called" ]
 }
 
 @test "fails on a system that is not Debian" {
@@ -780,7 +953,7 @@ dockerfile_apt_packages() {
   # Сначала обновляется база пакетов, затем ставятся пакеты в алфавитном
   # порядке; ничего лишнего не вызывается.
   [ "$(cat "${BATS_TEST_TMPDIR}/apt-get.calls")" \
-      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io iproute2 openssh-client openssh-server procps qrencode sudo systemd-timesyncd ufw unattended-upgrades' ]
+      = $'update\ninstall --yes console-setup curl docker-cli docker-compose docker.io iproute2 locales openssh-client openssh-server procps qrencode sudo systemd-timesyncd ufw unattended-upgrades' ]
 }
 
 @test "enables and starts the Docker service as the last step" {

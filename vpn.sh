@@ -12,6 +12,7 @@ APT_PACKAGES=(
   docker-compose
   docker.io
   iproute2
+  locales
   openssh-client
   openssh-server
   procps
@@ -78,6 +79,35 @@ JOURNALD_CONFIG_FILE=${JOURNALD_CONFIG_DIR}/99-storage.conf
 JOURNALD_PARAMS=(
   Storage=persistent
   SystemMaxUse=128M
+)
+
+# Файл настроек локали, который читает systemd; на Debian его же читает pam_env
+# при входе в систему
+LOCALE_CONF_FILE=/etc/locale.conf
+
+# Локаль по умолчанию
+LOCALE_DEFAULT=en_US.UTF-8
+
+# Файл со списком локалей, которые генерирует locale-gen
+LOCALE_GEN_FILE=/etc/locale.gen
+
+# Локали, которые нужно сгенерировать
+LOCALE_NAMES=(
+  en_US.UTF-8
+  ru_RU.UTF-8
+)
+
+# Категории локали с русскими форматами в форме <параметр>=<значение>
+LOCALE_PARAMS=(
+  LC_ADDRESS=ru_RU.UTF-8
+  LC_IDENTIFICATION=ru_RU.UTF-8
+  LC_MEASUREMENT=ru_RU.UTF-8
+  LC_MONETARY=ru_RU.UTF-8
+  LC_NAME=ru_RU.UTF-8
+  LC_NUMERIC=ru_RU.UTF-8
+  LC_PAPER=ru_RU.UTF-8
+  LC_TELEPHONE=ru_RU.UTF-8
+  LC_TIME=ru_RU.UTF-8
 )
 
 # Каталог со скриптами, которые pam_motd выполняет при каждом входе
@@ -165,6 +195,7 @@ main() {
   check_debian
   check_root
   install_apt_packages
+  configure_locale
   configure_linux_console
   configure_time
   configure_motd
@@ -229,6 +260,42 @@ install_apt_packages() {
   apt-get update
 
   DEBIAN_FRONTEND=noninteractive apt-get install --yes "${APT_PACKAGES[@]}"
+}
+
+configure_locale() {
+
+  local key
+  local locale
+  local param
+
+  print_step_msg "Configuring the locale"
+
+  if [[ ! -f "${LOCALE_GEN_FILE}" ]]; then
+    print_error_msg "... the file ${LOCALE_GEN_FILE} does not exist, install the locales package first"
+    return 1
+  fi
+
+  print_info_msg "Enabling the locales ${CL_BOLD}${LOCALE_NAMES[*]}${CL_NO} in ${LOCALE_GEN_FILE}"
+  for locale in "${LOCALE_NAMES[@]}"; do
+    set_config_line "${LOCALE_GEN_FILE}" "^[[:space:]]*#?[[:space:]]*${locale//./\\.}[[:space:]]+UTF-8" "${locale} UTF-8"
+  done
+
+  print_info_msg "Generating the locales"
+  locale-gen
+
+  print_info_msg "Updating ${LOCALE_CONF_FILE}"
+  set_config_param "${LOCALE_CONF_FILE}" LANG "LANG=${LOCALE_DEFAULT}"
+  for param in "${LOCALE_PARAMS[@]}"; do
+    key="${param%%=*}"
+    set_config_param "${LOCALE_CONF_FILE}" "${key}" "${param}"
+  done
+
+  print_info_msg "Applying the locale in the current session"
+  # LC_ALL перекрывает остальные переменные локали, поэтому иначе настройка не
+  # применилась бы
+  unset LC_ALL
+  export LANG="${LOCALE_DEFAULT}"
+  export "${LOCALE_PARAMS[@]}"
 }
 
 configure_linux_console() {
