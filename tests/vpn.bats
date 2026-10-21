@@ -31,7 +31,8 @@
 #   колонки — слева характеристики хоста (система, ядро, имя хоста, основной
 #   IP-адрес), справа потребление ресурсов и время работы (нагрузка, память,
 #   диск) — с подписями, выделенными жирным (без цвета); скрипт использует
-#   утилиты ip, free, uptime и df из пакетов iproute2 и procps;
+#   утилиты ip, free, uptime и df из пакетов iproute2 и procps; сводка окружена
+#   пустыми строками;
 # - статическое /etc/motd очищается, а скрипт base-files
 #   /etc/update-motd.d/10-uname удаляется: иначе вместе с краткой сводкой
 #   выводится стандартный текст и строка uname;
@@ -712,26 +713,47 @@ EOF
   local escape=$'\033'
   local plain
   plain="$(sed --regexp-extended "s/${escape}\[[0-9;]*m//g" <<< "$output")"
+  # Пустые строки вокруг таблицы проверяет отдельный тест, здесь — только
+  # строки таблицы.
+  local table
+  table="$(sed --regexp-extended '/^$/d' <<< "$plain")"
   # Две колонки по четыре строки: слева характеристики хоста, справа —
   # потребление ресурсов и время работы. Архитектуры процессора в выводе нет.
-  [ "$(wc --lines <<< "$plain")" -eq 4 ]
-  [[ "$(sed --quiet 1p <<< "$plain")" == "OS"*"${os_name}"*"Uptime"* ]]
-  [[ "$(sed --quiet 2p <<< "$plain")" == "Kernel"*"${kernel}"*"Load"* ]]
-  [[ "$(sed --quiet 3p <<< "$plain")" == "Host"*"${host_name}"*"Memory"* ]]
-  [[ "$(sed --quiet 4p <<< "$plain")" == "IP"*"Disk"* ]]
-  [[ "$plain" != *"Arch"* ]]
+  [ "$(wc --lines <<< "$table")" -eq 4 ]
+  [[ "$(sed --quiet 1p <<< "$table")" == "OS"*"${os_name}"*"Uptime"* ]]
+  [[ "$(sed --quiet 2p <<< "$table")" == "Kernel"*"${kernel}"*"Load"* ]]
+  [[ "$(sed --quiet 3p <<< "$table")" == "Host"*"${host_name}"*"Memory"* ]]
+  [[ "$(sed --quiet 4p <<< "$table")" == "IP"*"Disk"* ]]
+  [[ "$table" != *"Arch"* ]]
   # Строка IP содержит основной адрес хоста.
-  [[ "$(sed --quiet 4p <<< "$plain")" =~ ^IP\ +[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]
+  [[ "$(sed --quiet 4p <<< "$table")" =~ ^IP\ +[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]
   # Правый столбец начинается в одной и той же колонке на всех строках.
   local right_columns
-  right_columns="$(awk '{ match($0, /(Uptime|Load|Memory|Disk)/); print RSTART }' <<< "$plain" | sort --unique)"
+  right_columns="$(awk '{ match($0, /(Uptime|Load|Memory|Disk)/); print RSTART }' <<< "$table" | sort --unique)"
   [ "$(wc --lines <<< "$right_columns")" -eq 1 ]
   # Текущее потребление ресурсов и время работы.
-  [[ "$plain" == *"$(nproc) cores)"* ]]
-  [[ "$plain" == *" GiB / "* ]]
-  [[ "$plain" == *"%)"* ]]
+  [[ "$table" == *"$(nproc) cores)"* ]]
+  [[ "$table" == *" GiB / "* ]]
+  [[ "$table" == *"%)"* ]]
   # Время работы выводится человекочитаемо: единицы измерения, а не секунды.
-  [[ "$(sed --quiet 1p <<< "$plain")" =~ Uptime\ +[0-9] ]]
+  [[ "$(sed --quiet 1p <<< "$table")" =~ Uptime\ +[0-9] ]]
+}
+
+@test "surrounds the summary with blank lines" {
+  run_script
+  [ "$status" -eq 0 ]
+
+  # Вывод пишется в файл: в переменной bats и в подстановке команды конечная
+  # пустая строка теряется.
+  local file
+  file="$(mktemp)"
+  "$MOTD_FILE" > "$file"
+
+  [ -z "$(sed --quiet 1p "$file")" ]
+  [ -z "$(sed --quiet '$p' "$file")" ]
+  # Между пустыми строками — только таблица.
+  [ "$(grep --count --invert-match --extended-regexp '^$' "$file")" -eq 4 ]
+  rm --force -- "$file"
 }
 
 @test "is idempotent for the message of the day: a second run does not change it" {

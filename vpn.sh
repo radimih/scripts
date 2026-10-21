@@ -440,9 +440,13 @@ right_values=(
 LABEL_WIDTH="$(max_length "${left_labels[@]}" "${right_labels[@]}")"
 VALUE_WIDTH="$(max_length "${left_values[@]}")"
 
+printf '\n'
+
 for (( index = 0; index < ${#left_labels[@]}; index++ )); do
   row "${left_labels[index]}" "${left_values[index]}" "${right_labels[index]}" "${right_values[index]}"
 done
+
+printf '\n'
 MOTD
   chmod 0755 "${file}"
 }
