@@ -167,15 +167,17 @@ SUPERUSER_SSH_KEY_NAME=id_ed25519
 SYSCTL_DIR=/etc/sysctl.d
 SYSCTL_FILE=${SYSCTL_DIR}/9999-router.conf
 
-# Параметры ядра для работы роутером в форме <параметр>=<значение>, в порядке
-# записи в файл
+# Параметры ядра в форме <параметр>=<значение>
 SYSCTL_PARAMS=(
+  #  для маршрутизации
   net.core.default_qdisc=fq
   net.ipv4.ip_forward=1
   net.ipv4.tcp_congestion_control=bbr
   net.ipv4.tcp_keepalive_probes=1
   net.ipv4.tcp_mtu_probing=1
   net.ipv6.conf.all.disable_ipv6=1
+  # чтобы блокировки ufw не засоряли консоль
+  "kernel.printk=4 4 1 4"
 )
 
 # Часовой пояс
@@ -201,7 +203,7 @@ main() {
   configure_motd
   configure_journald
   configure_automatic_upgrades
-  configure_router_sysctl
+  configure_kernel_params
   configure_ssh
   configure_firewall
   configure_docker
@@ -501,12 +503,12 @@ set_apt_conf_param() {
   set_config_line "$1" "^[[:space:]]*(//)?[[:space:]]*$2[[:space:]]+" "$3"
 }
 
-configure_router_sysctl() {
+configure_kernel_params() {
 
   local param
   local key
 
-  print_step_msg "Configuring kernel parameters for routing"
+  print_step_msg "Configuring kernel parameters"
 
   if [[ ! -d "${SYSCTL_DIR}" ]]; then
     print_error_msg "... the directory ${SYSCTL_DIR} does not exist, cannot write ${SYSCTL_FILE}"

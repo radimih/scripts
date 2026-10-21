@@ -84,9 +84,11 @@
 #   сообщениях;
 # - при отсутствии /etc/locale.gen скрипт завершается с ошибкой и внятным
 #   сообщением, не трогая /etc/locale.conf;
-# - параметры ядра из SYSCTL_PARAMS записываются в /etc/sysctl.d/9999-router.conf:
-#   нужные строки заменяются на месте, остальное содержимое файла не меняется,
-#   повторный запуск файл не меняет;
+# - параметры ядра из SYSCTL_PARAMS записываются в /etc/sysctl.d/9999-router.conf,
+#   включая kernel.printk с console_loglevel = 4 (warning): сообщения ufw
+#   "[UFW BLOCK] ..." с этим уровнем больше не выводятся в консоль tty и остаются
+#   в журнале; нужные строки заменяются на месте, остальное содержимое файла
+#   не меняется, повторный запуск файл не меняет;
 # - параметры ядра применяются вызовом sysctl --load с этим файлом;
 # - при отсутствии каталога /etc/sysctl.d скрипт завершается с ошибкой
 #   и внятным сообщением;
@@ -990,11 +992,12 @@ EOF
       = $'restart systemd-journald\nreload ssh\nenable --now docker' ]
 }
 
-@test "writes the kernel parameters for the router role" {
+@test "writes the kernel parameters" {
   run_script
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"Updating ${SYSCTL_FILE}"* ]]
+  assert_has_line 'kernel.printk = 4 4 1 4' "$SYSCTL_FILE"
   assert_has_line 'net.core.default_qdisc = fq' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.ip_forward = 1' "$SYSCTL_FILE"
   assert_has_line 'net.ipv4.tcp_congestion_control = bbr' "$SYSCTL_FILE"
@@ -1002,7 +1005,7 @@ EOF
   assert_has_line 'net.ipv4.tcp_mtu_probing = 1' "$SYSCTL_FILE"
   assert_has_line 'net.ipv6.conf.all.disable_ipv6 = 1' "$SYSCTL_FILE"
   # Записаны только заданные параметры, по одному в строке.
-  [ "$(wc --lines < "$SYSCTL_FILE")" -eq 6 ]
+  [ "$(wc --lines < "$SYSCTL_FILE")" -eq 7 ]
 }
 
 @test "keeps the rest of the kernel parameters file and rewrites existing lines in place" {
@@ -1026,7 +1029,8 @@ EOF
   # Чужие строки не тронуты, остальные наши параметры добавлены в конец файла.
   assert_has_line '# Local notes' "$SYSCTL_FILE"
   assert_has_line 'vm.swappiness = 10' "$SYSCTL_FILE"
-  [ "$(wc --lines < "$SYSCTL_FILE")" -eq "$((lines_before + 4))" ]
+  assert_has_line 'kernel.printk = 4 4 1 4' "$SYSCTL_FILE"
+  [ "$(wc --lines < "$SYSCTL_FILE")" -eq "$((lines_before + 5))" ]
 }
 
 @test "is idempotent for the kernel parameters file: a second run does not change it" {
